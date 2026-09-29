@@ -1,0 +1,50 @@
+package com.quin.opacwarfare1201.opac;
+
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import xaero.pac.common.claims.player.api.IPlayerChunkClaimAPI;
+import xaero.pac.common.server.api.OpenPACServerAPI;
+import xaero.pac.common.server.parties.party.api.IPartyManagerAPI;
+import xaero.pac.common.server.parties.party.api.IServerPartyAPI;
+
+import javax.annotation.Nullable;
+import java.util.UUID;
+
+public final class OpacSides {
+    public record Side(UUID partyId, UUID ownerId, String name) {}
+
+    private OpacSides() {}
+
+    @Nullable
+    public static Side playerSide(MinecraftServer server, UUID playerId) {
+        IPartyManagerAPI pm = OpenPACServerAPI.get(server).getPartyManager();
+        IServerPartyAPI party = pm.getPartyByMember(playerId);
+        if (party == null) return null;
+        return new Side(party.getId(), party.getOwner().getUUID(), party.getDefaultName());
+    }
+
+    public static Side claimSide(MinecraftServer server, IPlayerChunkClaimAPI claim) {
+        UUID owner = claim.getPlayerId();
+        IPartyManagerAPI pm = OpenPACServerAPI.get(server).getPartyManager();
+        IServerPartyAPI party = pm.getPartyByOwner(owner);
+        if (party != null) return new Side(party.getId(), party.getOwner().getUUID(), party.getDefaultName());
+        return new Side(null, owner, owner.toString());
+    }
+
+    public static boolean isMember(MinecraftServer server, UUID playerId, UUID partyId, UUID soloOwnerId) {
+        if (partyId != null) {
+            IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
+            return p != null && p.getId().equals(partyId);
+        }
+        return playerId.equals(soloOwnerId);
+    }
+
+    public static boolean isOnline(MinecraftServer server, UUID partyId, UUID soloOwnerId) {
+        if (partyId != null) {
+            IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+            return p != null && p.getOnlineMemberStream().findAny().isPresent();
+        }
+        ServerPlayer player = server.getPlayerList().getPlayer(soloOwnerId);
+        return player != null;
+    }
+}
