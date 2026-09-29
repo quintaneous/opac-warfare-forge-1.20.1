@@ -8,7 +8,7 @@ import net.minecraft.world.entity.Entity;
 import xaero.pac.common.server.claims.protection.override.api.ChunkAccessOverride;
 import xaero.pac.common.server.claims.protection.override.api.ChunkAccessOverrideType;
 import xaero.pac.common.server.claims.protection.override.api.IChunkAccessOverriderAPI;
-import xaero.pac.common.server.player.config.api.IPlayerConfigAPI;
+import xaero.pac.common.server.player.config.api.v2.IPlayerConfigAPI;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
