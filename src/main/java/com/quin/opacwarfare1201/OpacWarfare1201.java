@@ -2,6 +2,7 @@ package com.quin.opacwarfare1201;
 
 import com.mojang.logging.LogUtils;
 import com.quin.opacwarfare1201.command.WarCommands;
+import com.quin.opacwarfare1201.compat.CBCProtectionEvents;
 import com.quin.opacwarfare1201.config.WarConfig;
 import com.quin.opacwarfare1201.opac.WarAccessOverrider;
 import com.quin.opacwarfare1201.war.WarManager;
@@ -26,6 +27,7 @@ public final class OpacWarfare1201 {
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, WarConfig.SPEC, "opac-warfare-1201.toml");
         MinecraftForge.EVENT_BUS.register(this);
         MinecraftForge.EVENT_BUS.register(WarManager.class);
+        MinecraftForge.EVENT_BUS.register(CBCProtectionEvents.class);
         LOGGER.info("OPaC Warfare 1.20.1 Port loading; CBC present={}", ModList.get().isLoaded("createbigcannons"));
     }
 
