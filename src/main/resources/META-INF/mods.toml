@@ -1,0 +1,33 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+description='''
+Unofficial Forge 1.20.1 warfare addon for Open Parties and Claims, inspired by the MIT-licensed Open Parties and Claims: Warfare project by SvinPepe.
+Adds border chunk wars, contested claim access, capture progress, claim transfer, persistence, war lives, and Create Big Cannons terrain protection.
+'''
+
+[[dependencies.${mod_id}]]
+modId="forge"
+mandatory=true
+versionRange="[47.4.10,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="openpartiesandclaims"
+mandatory=true
+versionRange="[0.27.5,)"
+ordering="AFTER"
+side="BOTH"
