@@ -22,6 +22,10 @@ public final class WarRecord {
     public WarPhase phase;
     public long activateAtGameTime;
     public double progress;
+    public boolean capturePointSet;
+    public int captureX;
+    public int captureY;
+    public int captureZ;
     public final Map<UUID, Integer> lives = new HashMap<>();
 
     public WarRecord(UUID id) {
@@ -48,6 +52,12 @@ public final class WarRecord {
         t.putString("phase", phase.name());
         t.putLong("activateAt", activateAtGameTime);
         t.putDouble("progress", progress);
+        t.putBoolean("capturePointSet", capturePointSet);
+        if (capturePointSet) {
+            t.putInt("captureX", captureX);
+            t.putInt("captureY", captureY);
+            t.putInt("captureZ", captureZ);
+        }
         CompoundTag lt = new CompoundTag();
         lives.forEach((uuid, n) -> lt.putInt(uuid.toString(), n));
         t.put("lives", lt);
@@ -69,6 +79,12 @@ public final class WarRecord {
         try { w.phase = WarPhase.valueOf(t.getString("phase")); } catch (Exception e) { w.phase = WarPhase.PREPARING; }
         w.activateAtGameTime = t.getLong("activateAt");
         w.progress = t.getDouble("progress");
+        w.capturePointSet = t.getBoolean("capturePointSet");
+        if (w.capturePointSet) {
+            w.captureX = t.getInt("captureX");
+            w.captureY = t.getInt("captureY");
+            w.captureZ = t.getInt("captureZ");
+        }
         CompoundTag lt = t.getCompound("lives");
         for (String k : lt.getAllKeys()) {
             try { w.lives.put(UUID.fromString(k), lt.getInt(k)); } catch (IllegalArgumentException ignored) {}
