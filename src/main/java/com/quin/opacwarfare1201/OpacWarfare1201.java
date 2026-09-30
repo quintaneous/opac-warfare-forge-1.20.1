@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.quin.opacwarfare1201.command.WarCommands;
 import com.quin.opacwarfare1201.compat.CBCProtectionEvents;
 import com.quin.opacwarfare1201.config.WarConfig;
+import com.quin.opacwarfare1201.opac.TerritoryClaimActionListener;
 import com.quin.opacwarfare1201.opac.WarAccessOverrider;
 import com.quin.opacwarfare1201.war.WarManager;
 import net.minecraftforge.common.MinecraftForge;
@@ -40,13 +41,12 @@ public final class OpacWarfare1201 {
     public void onServerStarted(ServerStartedEvent event) {
         WarManager manager = WarManager.get(event.getServer());
         try {
-            OpenPACServerAPI.get(event.getServer())
-                    .getServerClaimsManager()
-                    .getChunkAccessOverriderManager()
-                    .register(new WarAccessOverrider());
-            LOGGER.info("Registered OPaC contested-chunk access overrider");
+            var claims = OpenPACServerAPI.get(event.getServer()).getServerClaimsManager();
+            claims.getChunkAccessOverriderManager().register(new WarAccessOverrider());
+            claims.getActionListenerManager().register(new TerritoryClaimActionListener());
+            LOGGER.info("Registered OPaC contested-chunk access overrider and territory claim rules");
         } catch (Throwable t) {
-            LOGGER.error("Could not register OPaC access overrider", t);
+            LOGGER.error("Could not register OPaC warfare hooks", t);
         }
         manager.onServerStarted();
     }

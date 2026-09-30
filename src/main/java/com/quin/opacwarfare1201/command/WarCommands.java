@@ -2,6 +2,8 @@ package com.quin.opacwarfare1201.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.quin.opacwarfare1201.opac.OpacSides;
+import com.quin.opacwarfare1201.war.CapitalRecord;
 import com.quin.opacwarfare1201.war.WarManager;
 import com.quin.opacwarfare1201.war.WarRecord;
 import net.minecraft.ChatFormatting;
@@ -23,11 +25,18 @@ public final class WarCommands {
                 .then(Commands.literal("start").executes(ctx -> start(ctx.getSource())))
                 .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
                 .then(Commands.literal("surrender").executes(ctx -> surrender(ctx.getSource())))
+                .then(Commands.literal("capital")
+                        .then(Commands.literal("set").executes(ctx -> setCapital(ctx.getSource())))
+                        .then(Commands.literal("status").executes(ctx -> capitalStatus(ctx.getSource()))))
+                .then(Commands.literal("capitals").executes(ctx -> capitals(ctx.getSource())))
                 .then(Commands.literal("admin")
                         .requires(src -> src.hasPermission(2))
                         .then(Commands.literal("stop")
                                 .then(Commands.argument("warId", StringArgumentType.word())
                                         .executes(ctx -> adminStop(ctx.getSource(), StringArgumentType.getString(ctx, "warId")))))
+                        .then(Commands.literal("clearcapital")
+                                .then(Commands.argument("partyId", StringArgumentType.word())
+                                        .executes(ctx -> clearCapital(ctx.getSource(), StringArgumentType.getString(ctx, "partyId")))))
                         .then(Commands.literal("list").executes(ctx -> list(ctx.getSource()))))
         );
     }
@@ -44,13 +53,20 @@ public final class WarCommands {
                 src.sendFailure(Component.literal("Only the party owner can start a war in this beta."));
                 return 0;
             }
+
             ChunkPos target = player.chunkPosition();
             WarManager.StartResult result = WarManager.get(src.getServer()).startWar(player, target);
             if (!result.success()) {
                 src.sendFailure(Component.literal(result.message()));
                 return 0;
             }
-            src.sendSuccess(() -> Component.literal(result.message() + " ID=" + result.war().id).withStyle(ChatFormatting.GREEN), false);
+
+            WarRecord war = result.war();
+            String objective = war.capturePointSet
+                    ? " Objective=(" + war.captureX + ", " + war.captureY + ", " + war.captureZ + "), full chunk, +/-10 Y."
+                    : "";
+            src.sendSuccess(() -> Component.literal(result.message() + objective + " ID=" + war.id)
+                    .withStyle(ChatFormatting.GREEN), false);
             return 1;
         } catch (Exception e) {
             src.sendFailure(Component.literal("War start failed: " + e.getMessage()));
@@ -64,9 +80,81 @@ public final class WarCommands {
             src.sendSuccess(() -> Component.literal("No active/preparing chunk wars."), false);
             return 1;
         }
+
         for (WarRecord w : m.wars()) {
             int pct = (int)Math.round(w.progress * 100D);
-            src.sendSuccess(() -> Component.literal(w.id + " | " + w.phase + " | " + w.dimension + " [" + w.chunkX + "," + w.chunkZ + "] | " + pct + "%"), false);
+            WarManager.CaptureCounts counts = m.countCaptureZone(w);
+            String objective = w.capturePointSet
+                    ? " | objective=(" + w.captureX + "," + w.captureY + "," + w.captureZ + "), full chunk +/-10Y"
+                    : "";
+            String line = m.attackerName(w) + " -> " + m.defenderName(w)
+                    + " | " + w.phase
+                    + " | " + w.dimension + " [" + w.chunkX + "," + w.chunkZ + "]"
+                    + " | " + pct + "% attacker control"
+                    + " | zone A:" + counts.attackers() + " D:" + counts.defenders()
+                    + objective
+                    + " | " + w.id;
+            src.sendSuccess(() -> Component.literal(line), false);
+        }
+        return 1;
+    }
+
+    private static int setCapital(CommandSourceStack src) {
+        try {
+            ServerPlayer player = src.getPlayerOrException();
+            WarManager.CapitalResult result = WarManager.get(src.getServer()).setCapital(player);
+            if (!result.success()) {
+                src.sendFailure(Component.literal(result.message()));
+                return 0;
+            }
+
+            CapitalRecord c = result.capital();
+            src.sendSuccess(() -> Component.literal("Capital established at " + c.dimension
+                    + " [" + c.chunkX + ", " + c.chunkZ + "].")
+                    .withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
+            return 1;
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("Capital setup failed: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int capitalStatus(CommandSourceStack src) {
+        try {
+            ServerPlayer player = src.getPlayerOrException();
+            IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(player.getUUID());
+            if (party == null) {
+                src.sendFailure(Component.literal("You are not in an OPaC party."));
+                return 0;
+            }
+
+            CapitalRecord c = WarManager.get(src.getServer()).capital(party.getId());
+            if (c == null) {
+                src.sendFailure(Component.literal("Your nation has no capital. The party owner can use /war capital set."));
+                return 0;
+            }
+
+            src.sendSuccess(() -> Component.literal("Capital: " + party.getDefaultName() + " | "
+                    + c.dimension + " [" + c.chunkX + ", " + c.chunkZ + "]")
+                    .withStyle(ChatFormatting.GOLD), false);
+            return 1;
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("Capital status failed: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int capitals(CommandSourceStack src) {
+        WarManager m = WarManager.get(src.getServer());
+        if (m.capitals().isEmpty()) {
+            src.sendSuccess(() -> Component.literal("No capitals have been established."), false);
+            return 1;
+        }
+
+        for (CapitalRecord c : m.capitals()) {
+            String name = OpacSides.sideName(src.getServer(), c.partyId, c.ownerId);
+            String line = "★ " + name + " | " + c.dimension + " [" + c.chunkX + ", " + c.chunkZ + "] | party=" + c.partyId;
+            src.sendSuccess(() -> Component.literal(line).withStyle(ChatFormatting.GOLD), false);
         }
         return 1;
     }
@@ -79,6 +167,7 @@ public final class WarCommands {
                 src.sendFailure(Component.literal("Only the party owner can surrender in this beta."));
                 return 0;
             }
+
             WarManager m = WarManager.get(src.getServer());
             for (WarRecord w : m.wars()) {
                 if (m.isParticipant(w, p.getUUID(), false)) {
@@ -86,6 +175,7 @@ public final class WarCommands {
                     return 1;
                 }
             }
+
             src.sendFailure(Component.literal("Your side is not in a chunk war."));
             return 0;
         } catch (Exception e) {
@@ -97,7 +187,10 @@ public final class WarCommands {
     private static int adminStop(CommandSourceStack src, String raw) {
         try {
             UUID id = UUID.fromString(raw);
-            WarRecord w = WarManager.get(src.getServer()).wars().stream().filter(x -> x.id.equals(id)).findFirst().orElse(null);
+            WarRecord w = WarManager.get(src.getServer()).wars().stream()
+                    .filter(x -> x.id.equals(id))
+                    .findFirst()
+                    .orElse(null);
             if (w == null) {
                 src.sendFailure(Component.literal("Unknown war ID."));
                 return 0;
@@ -110,5 +203,23 @@ public final class WarCommands {
         }
     }
 
-    private static int list(CommandSourceStack src) { return status(src); }
+    private static int clearCapital(CommandSourceStack src, String raw) {
+        try {
+            UUID partyId = UUID.fromString(raw);
+            if (!WarManager.get(src.getServer()).clearCapital(partyId)) {
+                src.sendFailure(Component.literal("No capital exists for that party ID."));
+                return 0;
+            }
+            src.sendSuccess(() -> Component.literal("Capital cleared for party " + partyId + ".")
+                    .withStyle(ChatFormatting.YELLOW), true);
+            return 1;
+        } catch (IllegalArgumentException e) {
+            src.sendFailure(Component.literal("Invalid party UUID."));
+            return 0;
+        }
+    }
+
+    private static int list(CommandSourceStack src) {
+        return status(src);
+    }
 }

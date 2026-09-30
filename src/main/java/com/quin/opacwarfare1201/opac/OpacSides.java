@@ -40,7 +40,16 @@ public final class OpacSides {
         return a.ownerId().equals(b.ownerId());
     }
 
-    public static boolean isMember(MinecraftServer server, UUID playerId, UUID partyId, UUID soloOwnerId) {
+    public static String sideName(MinecraftServer server, @Nullable UUID partyId, UUID ownerId) {
+        if (partyId != null) {
+            IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+            if (party != null) return party.getDefaultName();
+        }
+        ServerPlayer player = server.getPlayerList().getPlayer(ownerId);
+        return player != null ? player.getGameProfile().getName() : ownerId.toString();
+    }
+
+    public static boolean isMember(MinecraftServer server, UUID playerId, @Nullable UUID partyId, UUID soloOwnerId) {
         if (partyId != null) {
             IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
             return p != null && p.getId().equals(partyId);
@@ -48,7 +57,7 @@ public final class OpacSides {
         return playerId.equals(soloOwnerId);
     }
 
-    public static boolean isOnline(MinecraftServer server, UUID partyId, UUID soloOwnerId) {
+    public static boolean isOnline(MinecraftServer server, @Nullable UUID partyId, UUID soloOwnerId) {
         if (partyId != null) {
             IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
             return p != null && p.getOnlineMemberStream().findAny().isPresent();
