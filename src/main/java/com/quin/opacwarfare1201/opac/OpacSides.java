@@ -27,8 +27,17 @@ public final class OpacSides {
         UUID owner = claim.getPlayerId();
         IPartyManagerAPI pm = OpenPACServerAPI.get(server).getPartyManager();
         IServerPartyAPI party = pm.getPartyByOwner(owner);
+        if (party == null) party = pm.getPartyByMember(owner);
         if (party != null) return new Side(party.getId(), party.getOwner().getUUID(), party.getDefaultName());
         return new Side(null, owner, owner.toString());
+    }
+
+    public static boolean sameSide(@Nullable Side a, @Nullable Side b) {
+        if (a == null || b == null) return false;
+        if (a.partyId() != null || b.partyId() != null) {
+            return a.partyId() != null && a.partyId().equals(b.partyId());
+        }
+        return a.ownerId().equals(b.ownerId());
     }
 
     public static boolean isMember(MinecraftServer server, UUID playerId, UUID partyId, UUID soloOwnerId) {
