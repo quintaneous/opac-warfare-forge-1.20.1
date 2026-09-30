@@ -1,5 +1,6 @@
 package com.quin.opacwarfare1201.opac;
 
+import com.quin.opacwarfare1201.war.StrategicCity;
 import com.quin.opacwarfare1201.war.WarManager;
 import com.quin.opacwarfare1201.war.WarRecord;
 import net.minecraft.resources.ResourceLocation;
@@ -17,7 +18,7 @@ import java.util.UUID;
 public final class WarAccessOverrider implements IChunkAccessOverriderAPI {
     @Override
     public @Nonnull String getName() {
-        return "OPaC Warfare 1.20.1 contested access";
+        return "OPaC Warfare 1.20.1 war and strategic city access";
     }
 
     @Override
@@ -30,11 +31,24 @@ public final class WarAccessOverrider implements IChunkAccessOverriderAPI {
                                                              @Nonnull MinecraftServer server,
                                                              @Nonnull ChunkAccessOverride currentOverride) {
         if (dim == null) return currentOverride;
-        WarRecord war = WarManager.get(server).activeWarAt(dim, x, z);
-        if (war == null) return currentOverride;
-        if (WarManager.get(server).isParticipant(war, accessorId, true)) {
-            return new ChunkAccessOverride(ChunkAccessOverrideType.ALLOW);
+
+        WarManager manager = WarManager.get(server);
+        WarRecord war = manager.activeWarAt(dim, x, z);
+        if (war != null) {
+            if (manager.isParticipant(war, accessorId, true)) {
+                return new ChunkAccessOverride(ChunkAccessOverrideType.ALLOW);
+            }
+            return new ChunkAccessOverride(ChunkAccessOverrideType.PROTECT);
         }
-        return new ChunkAccessOverride(ChunkAccessOverrideType.PROTECT);
+
+        StrategicCity city = manager.cityAtChunk(dim, x, z);
+        if (city != null) {
+            if (manager.canPlayerAccessCityChunk(accessorId, dim, x, z)) {
+                return new ChunkAccessOverride(ChunkAccessOverrideType.ALLOW);
+            }
+            return new ChunkAccessOverride(ChunkAccessOverrideType.PROTECT);
+        }
+
+        return currentOverride;
     }
 }

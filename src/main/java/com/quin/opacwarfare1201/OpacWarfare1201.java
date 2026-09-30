@@ -3,6 +3,7 @@ package com.quin.opacwarfare1201;
 import com.mojang.logging.LogUtils;
 import com.quin.opacwarfare1201.command.WarCommands;
 import com.quin.opacwarfare1201.compat.CBCProtectionEvents;
+import com.quin.opacwarfare1201.compat.CityProtectionEvents;
 import com.quin.opacwarfare1201.config.WarConfig;
 import com.quin.opacwarfare1201.opac.TerritoryClaimActionListener;
 import com.quin.opacwarfare1201.opac.WarAccessOverrider;
@@ -29,6 +30,7 @@ public final class OpacWarfare1201 {
         MinecraftForge.EVENT_BUS.register(this);
         MinecraftForge.EVENT_BUS.register(WarManager.class);
         MinecraftForge.EVENT_BUS.register(CBCProtectionEvents.class);
+        MinecraftForge.EVENT_BUS.register(CityProtectionEvents.class);
         LOGGER.info("OPaC Warfare 1.20.1 Port loading; CBC present={}", ModList.get().isLoaded("createbigcannons"));
     }
 
@@ -44,7 +46,7 @@ public final class OpacWarfare1201 {
             var claims = OpenPACServerAPI.get(event.getServer()).getServerClaimsManager();
             claims.getChunkAccessOverriderManager().register(new WarAccessOverrider());
             claims.getActionListenerManager().register(new TerritoryClaimActionListener());
-            LOGGER.info("Registered OPaC contested-chunk access overrider and territory claim rules");
+            LOGGER.info("Registered OPaC war/city access and territory claim rules");
         } catch (Throwable t) {
             LOGGER.error("Could not register OPaC warfare hooks", t);
         }

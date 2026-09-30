@@ -11,7 +11,7 @@ import javax.annotation.Nullable;
 import java.util.UUID;
 
 public final class OpacSides {
-    public record Side(UUID partyId, UUID ownerId, String name) {}
+    public record Side(@Nullable UUID partyId, UUID ownerId, String name) {}
 
     private OpacSides() {}
 
@@ -40,28 +40,30 @@ public final class OpacSides {
         return a.ownerId().equals(b.ownerId());
     }
 
-    public static String sideName(MinecraftServer server, @Nullable UUID partyId, UUID ownerId) {
+    public static String sideName(MinecraftServer server, @Nullable UUID partyId, @Nullable UUID ownerId) {
         if (partyId != null) {
             IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
             if (party != null) return party.getDefaultName();
         }
+        if (ownerId == null) return "Neutral";
         ServerPlayer player = server.getPlayerList().getPlayer(ownerId);
         return player != null ? player.getGameProfile().getName() : ownerId.toString();
     }
 
-    public static boolean isMember(MinecraftServer server, UUID playerId, @Nullable UUID partyId, UUID soloOwnerId) {
+    public static boolean isMember(MinecraftServer server, UUID playerId, @Nullable UUID partyId, @Nullable UUID soloOwnerId) {
         if (partyId != null) {
             IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
             return p != null && p.getId().equals(partyId);
         }
-        return playerId.equals(soloOwnerId);
+        return soloOwnerId != null && playerId.equals(soloOwnerId);
     }
 
-    public static boolean isOnline(MinecraftServer server, @Nullable UUID partyId, UUID soloOwnerId) {
+    public static boolean isOnline(MinecraftServer server, @Nullable UUID partyId, @Nullable UUID soloOwnerId) {
         if (partyId != null) {
             IServerPartyAPI p = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
             return p != null && p.getOnlineMemberStream().findAny().isPresent();
         }
+        if (soloOwnerId == null) return false;
         ServerPlayer player = server.getPlayerList().getPlayer(soloOwnerId);
         return player != null;
     }

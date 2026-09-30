@@ -5,6 +5,7 @@ import com.quin.opacwarfare1201.config.WarConfig;
 import com.quin.opacwarfare1201.data.WarSavedData;
 import com.quin.opacwarfare1201.opac.OpacSides;
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
@@ -14,6 +15,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
@@ -58,9 +60,47 @@ public final class WarManager {
         return Collections.unmodifiableCollection(data.capitals());
     }
 
+    public Collection<StrategicCity> cities() {
+        return Collections.unmodifiableCollection(data.cities());
+    }
+
     @Nullable
     public CapitalRecord capital(UUID partyId) {
         return data.getCapital(partyId);
+    }
+
+    @Nullable
+    public StrategicCity city(String id) {
+        return data.getCity(id);
+    }
+
+    @Nullable
+    public StrategicCity cityAtChunk(ResourceLocation dim, int x, int z) {
+        for (StrategicCity city : data.cities()) {
+            if (city.containsChunk(dim, x, z)) return city;
+        }
+        return null;
+    }
+
+    @Nullable
+    public StrategicCity cityAtBlock(ResourceLocation dim, BlockPos pos) {
+        return cityAtChunk(dim, pos.getX() >> 4, pos.getZ() >> 4);
+    }
+
+    public boolean isProtectedCityBlock(ResourceLocation dim, BlockPos pos) {
+        StrategicCity city = cityAtBlock(dim, pos);
+        return city != null && city.isProtected(pos);
+    }
+
+    public boolean canPlayerAccessCityChunk(UUID playerId, ResourceLocation dim, int x, int z) {
+        StrategicCity city = cityAtChunk(dim, x, z);
+        if (city == null) return false;
+
+        WarRecord war = activeWarForCity(city.id);
+        if (war != null) return isParticipant(war, playerId, true);
+
+        return city.controllerPartyId != null
+                && OpacSides.isMember(server, playerId, city.controllerPartyId, city.controllerOwnerId);
     }
 
     public void onServerStarted() {
@@ -68,19 +108,46 @@ public final class WarManager {
         for (WarRecord war : data.wars()) {
             ServerLevel level = level(war.dimension);
             if (level != null && !war.capturePointSet) {
-                setCapturePoint(war, level);
+                if (war.isCityWar()) {
+                    StrategicCity city = data.getCity(war.cityId);
+                    if (city != null) setCityWarCapturePoint(war, city);
+                } else {
+                    setCapturePoint(war, level);
+                }
                 changed = true;
             }
         }
         if (changed) data.changed();
-        OpacWarfare1201.LOGGER.info("Loaded {} persisted chunk war(s) and {} capital(s)",
-                data.wars().size(), data.capitals().size());
+
+        OpacWarfare1201.LOGGER.info("Loaded {} persisted war(s), {} capital(s), and {} strategic city/cities",
+                data.wars().size(), data.capitals().size(), data.cities().size());
     }
 
     @Nullable
     public WarRecord activeWarAt(ResourceLocation dim, int x, int z) {
         for (WarRecord w : data.wars()) {
-            if (w.phase == WarPhase.ACTIVE && w.targets(dim, x, z)) return w;
+            if (w.phase != WarPhase.ACTIVE || !w.dimension.equals(dim)) continue;
+            if (!w.isCityWar() && w.targets(dim, x, z)) return w;
+            if (w.isCityWar()) {
+                StrategicCity city = data.getCity(w.cityId);
+                if (city != null && city.containsChunk(dim, x, z)) return w;
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    public WarRecord activeWarForCity(String cityId) {
+        for (WarRecord w : data.wars()) {
+            if (w.phase == WarPhase.ACTIVE && w.isCityWar() && cityId.equalsIgnoreCase(w.cityId)) return w;
+        }
+        return null;
+    }
+
+    @Nullable
+    public WarRecord anyWarForCity(String cityId) {
+        for (WarRecord w : data.wars()) {
+            if (w.isCityWar() && cityId.equalsIgnoreCase(w.cityId)) return w;
         }
         return null;
     }
@@ -89,6 +156,10 @@ public final class WarManager {
     public WarRecord anyWarAt(ResourceLocation dim, int x, int z) {
         for (WarRecord w : data.wars()) {
             if (w.targets(dim, x, z)) return w;
+            if (w.isCityWar()) {
+                StrategicCity city = data.getCity(w.cityId);
+                if (city != null && city.containsChunk(dim, x, z)) return w;
+            }
         }
         return null;
     }
@@ -110,7 +181,17 @@ public final class WarManager {
     }
 
     public String defenderName(WarRecord war) {
+        if (war.defenderPartyId == null && war.isCityWar()) {
+            StrategicCity city = data.getCity(war.cityId);
+            return city == null ? "Neutral" : "Neutral " + city.id;
+        }
         return OpacSides.sideName(server, war.defenderPartyId, war.defenderOwnerId);
+    }
+
+    public String cityControllerName(StrategicCity city) {
+        return city.controllerPartyId == null
+                ? "Neutral"
+                : OpacSides.sideName(server, city.controllerPartyId, city.controllerOwnerId);
     }
 
     public StartResult startWar(ServerPlayer attacker, ChunkPos target) {
@@ -123,6 +204,10 @@ public final class WarManager {
         IPlayerChunkClaimAPI targetClaim = claims.get(dim, target.x, target.z);
         if (targetClaim == null) return StartResult.fail("The target chunk is wilderness.");
         if (SpecialClaimOwners.SERVER.equals(targetClaim.getPlayerId())) {
+            StrategicCity city = cityAtChunk(dim, target.x, target.z);
+            if (city != null) {
+                return StartResult.fail("That chunk belongs to strategic city " + city.id + ". Use /war city attack " + city.id + ".");
+            }
             return StartResult.fail("Server-owned territory cannot be attacked.");
         }
 
@@ -136,18 +221,8 @@ public final class WarManager {
             return StartResult.fail("You cannot attack your own party's claim.");
         }
 
-        CapitalRecord attackerCapital = data.getCapital(attackerSide.partyId());
-        if (attackerCapital == null) {
-            return StartResult.fail("Your nation must set a capital with /war capital set before starting a war.");
-        }
-
-        if (WarConfig.ONLY_ONE_OFFENSIVE_WAR_PER_SIDE.get()) {
-            for (WarRecord w : data.wars()) {
-                if (attackerSide.partyId().equals(w.attackerPartyId)) {
-                    return StartResult.fail("Your party already has an offensive chunk war.");
-                }
-            }
-        }
+        String commonFailure = validateAttackerCanStartWar(attackerSide);
+        if (commonFailure != null) return StartResult.fail(commonFailure);
 
         if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
                 && !OpacSides.isOnline(server, defenderSide.partyId(), defenderSide.ownerId())) {
@@ -158,12 +233,12 @@ public final class WarManager {
             return StartResult.fail("You can only attack an exposed enemy border chunk.");
         }
 
-        int attackDistance = attackDistanceFromCapitalNetwork(claims, attackerSide, dim, target);
+        int attackDistance = attackDistanceFromValidTerritory(claims, attackerSide, dim, target);
         if (attackDistance < 0) {
-            return StartResult.fail("Your capital is not connected to valid territory in this dimension.");
+            return StartResult.fail("Your nation has no valid capital- or city-anchored territory in this dimension.");
         }
         if (attackDistance > WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get()) {
-            return StartResult.fail("Target is " + attackDistance + " chunks from your capital-connected territory; Season 1 maximum is "
+            return StartResult.fail("Target is " + attackDistance + " chunks from your valid territory; Season 1 maximum is "
                     + WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get() + ".");
         }
 
@@ -194,6 +269,83 @@ public final class WarManager {
         return StartResult.ok(war);
     }
 
+    public StartResult startCityWar(ServerPlayer attacker, String cityId) {
+        StrategicCity city = data.getCity(cityId);
+        if (city == null) return StartResult.fail("Unknown strategic city: " + cityId + ".");
+        if (!attacker.level().dimension().location().equals(city.dimension)) {
+            return StartResult.fail("You must be in the same dimension as the strategic city.");
+        }
+        if (anyWarForCity(city.id) != null) {
+            return StartResult.fail("That strategic city is already in a war.");
+        }
+
+        OpacSides.Side attackerSide = OpacSides.playerSide(server, attacker.getUUID());
+        if (attackerSide == null || attackerSide.partyId() == null) {
+            return StartResult.fail("You must be in an OPaC party to attack a strategic city.");
+        }
+        if (city.isControlledBy(attackerSide.partyId())) {
+            return StartResult.fail("Your nation already controls " + city.id + ".");
+        }
+
+        String commonFailure = validateAttackerCanStartWar(attackerSide);
+        if (commonFailure != null) return StartResult.fail(commonFailure);
+
+        if (city.controllerPartyId != null
+                && WarConfig.REQUIRE_ONLINE_DEFENDER.get()
+                && !OpacSides.isOnline(server, city.controllerPartyId, city.controllerOwnerId)) {
+            return StartResult.fail("At least one player from the city controller must be online.");
+        }
+
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        int distance = attackDistanceToCity(claims, attackerSide, city);
+        if (distance < 0) {
+            return StartResult.fail("Your nation has no valid capital- or city-anchored territory in this dimension.");
+        }
+        if (distance > WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get()) {
+            return StartResult.fail(city.id + " is " + distance + " chunks from your valid territory; Season 1 maximum is "
+                    + WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get() + ".");
+        }
+
+        WarRecord war = new WarRecord(UUID.randomUUID());
+        war.dimension = city.dimension;
+        war.chunkX = city.captureChunkX;
+        war.chunkZ = city.captureChunkZ;
+        war.attackerPartyId = attackerSide.partyId();
+        war.attackerOwnerId = attackerSide.ownerId();
+        war.defenderPartyId = city.controllerPartyId;
+        war.defenderOwnerId = city.controllerOwnerId;
+        war.cityId = city.id;
+        war.phase = WarPhase.PREPARING;
+        setCityWarCapturePoint(war, city);
+
+        ServerLevel level = level(city.dimension);
+        long now = level == null ? server.overworld().getGameTime() : level.getGameTime();
+        war.activateAtGameTime = now + WarConfig.PREPARATION_SECONDS.get() * 20L;
+        war.progress = 0.5D;
+
+        data.put(war);
+        broadcast(Component.literal("CITY WAR: " + attackerSide.name() + " is preparing an attack on " + city.id
+                + " (" + cityControllerName(city) + ") at capture chunk [" + city.captureChunkX + ", " + city.captureChunkZ + "].")
+                .withStyle(ChatFormatting.LIGHT_PURPLE, ChatFormatting.BOLD));
+        return StartResult.ok(war);
+    }
+
+    @Nullable
+    private String validateAttackerCanStartWar(OpacSides.Side attackerSide) {
+        if (attackerSide.partyId() == null || data.getCapital(attackerSide.partyId()) == null) {
+            return "Your nation must set a capital with /war capital set before starting a war.";
+        }
+
+        if (WarConfig.ONLY_ONE_OFFENSIVE_WAR_PER_SIDE.get()) {
+            for (WarRecord w : data.wars()) {
+                if (attackerSide.partyId().equals(w.attackerPartyId)) {
+                    return "Your party already has an offensive war.";
+                }
+            }
+        }
+        return null;
+    }
+
     private boolean isAccessibleBorder(IServerClaimsManagerAPI claims, ResourceLocation dim, int x, int z, OpacSides.Side attacker) {
         for (int[] d : CARDINAL) {
             if (neighborAccessible(claims, dim, x + d[0], z + d[1], attacker)) return true;
@@ -221,6 +373,13 @@ public final class WarManager {
         war.captureX = x;
         war.captureY = y;
         war.captureZ = z;
+        war.capturePointSet = true;
+    }
+
+    private void setCityWarCapturePoint(WarRecord war, StrategicCity city) {
+        war.captureX = (city.captureChunkX << 4) + 8;
+        war.captureY = city.captureY;
+        war.captureZ = (city.captureChunkZ << 4) + 8;
         war.capturePointSet = true;
     }
 
@@ -293,6 +452,141 @@ public final class WarManager {
         return data.removeCapital(partyId) != null;
     }
 
+    public CityResult createCity(ServerPlayer admin, String rawId, int radiusChunks) {
+        String id = rawId.toLowerCase(Locale.ROOT);
+        if (!id.matches("[a-z0-9_-]{1,32}")) {
+            return CityResult.fail("City ID must be 1-32 characters using a-z, 0-9, _ or -.");
+        }
+        if (radiusChunks < 0 || radiusChunks > 4) {
+            return CityResult.fail("City radius must be between 0 and 4 chunks.");
+        }
+        if (data.hasCity(id)) return CityResult.fail("A strategic city with that ID already exists.");
+
+        ResourceLocation dim = admin.level().dimension().location();
+        ServerLevel level = level(dim);
+        if (level == null) return CityResult.fail("Could not access that dimension.");
+
+        ChunkPos center = admin.chunkPosition();
+        int minX = center.x - radiusChunks;
+        int maxX = center.x + radiusChunks;
+        int minZ = center.z - radiusChunks;
+        int maxZ = center.z + radiusChunks;
+
+        for (StrategicCity existing : data.cities()) {
+            if (!existing.dimension.equals(dim)) continue;
+            boolean overlaps = minX <= existing.maxChunkX && maxX >= existing.minChunkX
+                    && minZ <= existing.maxChunkZ && maxZ >= existing.minChunkZ;
+            if (overlaps) return CityResult.fail("That region overlaps strategic city " + existing.id + ".");
+        }
+
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        if (!claims.isClaimable(dim)) return CityResult.fail("OPaC claims are disabled in this dimension.");
+
+        for (int cx = minX; cx <= maxX; cx++) {
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                if (claims.get(dim, cx, cz) != null) {
+                    return CityResult.fail("Every city chunk must be wilderness before creation. Chunk ["
+                            + cx + ", " + cz + "] is already claimed.");
+                }
+            }
+        }
+
+        StrategicCity city = new StrategicCity(id);
+        city.dimension = dim;
+        city.minChunkX = minX;
+        city.minChunkZ = minZ;
+        city.maxChunkX = maxX;
+        city.maxChunkZ = maxZ;
+        city.captureChunkX = center.x;
+        city.captureChunkZ = center.z;
+        int captureX = (center.x << 4) + 8;
+        int captureZ = (center.z << 4) + 8;
+        city.captureY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, captureX, captureZ);
+
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int cx = minX; cx <= maxX; cx++) {
+            int blockMinX = cx << 4;
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                int blockMinZ = cz << 4;
+                for (int x = blockMinX; x < blockMinX + 16; x++) {
+                    for (int z = blockMinZ; z < blockMinZ + 16; z++) {
+                        for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++) {
+                            pos.set(x, y, z);
+                            BlockState state = level.getBlockState(pos);
+                            if (!state.isAir() && state.getFluidState().isEmpty()) {
+                                city.protectedBlocks.add(pos.asLong());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        List<ChunkPos> claimed = new ArrayList<>();
+        for (int cx = minX; cx <= maxX; cx++) {
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                if (claims.claim(dim, SpecialClaimOwners.SERVER, 0, cx, cz, false) == null) {
+                    for (ChunkPos cp : claimed) claims.unclaim(dim, cp.x, cp.z);
+                    return CityResult.fail("OPaC failed to reserve the city region. Creation was rolled back.");
+                }
+                claimed.add(new ChunkPos(cx, cz));
+            }
+        }
+
+        data.putCity(city);
+        broadcast(Component.literal("STRATEGIC CITY CREATED: " + city.id + " | "
+                + ((maxX - minX + 1) * (maxZ - minZ + 1)) + " chunks | "
+                + city.protectedBlocks.size() + " permanent protected blocks.")
+                .withStyle(ChatFormatting.LIGHT_PURPLE));
+        return CityResult.ok(city, city.protectedBlocks.size());
+    }
+
+    public CityResult deleteCity(String cityId) {
+        StrategicCity city = data.getCity(cityId);
+        if (city == null) return CityResult.fail("Unknown strategic city: " + cityId + ".");
+        if (anyWarForCity(city.id) != null) return CityResult.fail("Stop the city's active/preparing war before deleting it.");
+
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        for (int cx = city.minChunkX; cx <= city.maxChunkX; cx++) {
+            for (int cz = city.minChunkZ; cz <= city.maxChunkZ; cz++) {
+                IPlayerChunkClaimAPI claim = claims.get(city.dimension, cx, cz);
+                if (claim != null && SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) {
+                    claims.unclaim(city.dimension, cx, cz);
+                }
+            }
+        }
+
+        data.removeCity(city.id);
+        broadcast(Component.literal("STRATEGIC CITY REMOVED: " + city.id + ".")
+                .withStyle(ChatFormatting.YELLOW));
+        return CityResult.ok(city, city.protectedBlocks.size());
+    }
+
+    public CityResult setCityController(String cityId, @Nullable UUID partyId) {
+        StrategicCity city = data.getCity(cityId);
+        if (city == null) return CityResult.fail("Unknown strategic city: " + cityId + ".");
+        if (anyWarForCity(city.id) != null) return CityResult.fail("Cannot change city controller during a war.");
+
+        if (partyId == null) {
+            city.controllerPartyId = null;
+            city.controllerOwnerId = null;
+            data.changed();
+            broadcast(Component.literal("CITY CONTROL: " + city.id + " is now Neutral.")
+                    .withStyle(ChatFormatting.LIGHT_PURPLE));
+            return CityResult.ok(city, city.protectedBlocks.size());
+        }
+
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party == null) return CityResult.fail("No OPaC party exists with UUID " + partyId + ".");
+
+        city.controllerPartyId = party.getId();
+        city.controllerOwnerId = party.getOwner().getUUID();
+        data.changed();
+        broadcast(Component.literal("CITY CONTROL: " + city.id + " is now controlled by " + party.getDefaultName() + ".")
+                .withStyle(ChatFormatting.LIGHT_PURPLE));
+        return CityResult.ok(city, city.protectedBlocks.size());
+    }
+
     @Nullable
     public String validateNormalClaimAction(UUID playerId, ResourceLocation dim, int x, int z,
                                             ClaimingAction action, IServerClaimsManagerAPI claims) {
@@ -303,21 +597,18 @@ public final class WarManager {
             IPlayerChunkClaimAPI current = claims.get(dim, x, z);
             if (current != null) return null;
 
-            if (!sideHasAnyClaimInDimension(claims, side, dim)) return null;
+            boolean anyClaims = sideHasAnyClaimInDimension(claims, side, dim);
+            boolean hasAnchor = hasValidAnchorInDimension(side, dim);
 
-            CapitalRecord capital = data.getCapital(side.partyId());
-            if (capital != null && capital.dimension.equals(dim)) {
-                Set<ChunkPos> connected = capitalConnectedClaims(claims, side, dim, null);
-                for (int[] d : CARDINAL) {
-                    if (connected.contains(new ChunkPos(x + d[0], z + d[1]))) return null;
-                }
-                return "New claims must touch territory connected to your capital on a north/south/east/west side.";
-            }
+            if (!anyClaims && !hasAnchor) return null;
 
+            Set<ChunkPos> valid = validConnectedClaims(claims, side, dim, null);
             for (int[] d : CARDINAL) {
-                if (isFriendlyClaim(claims, side, dim, x + d[0], z + d[1])) return null;
+                if (valid.contains(new ChunkPos(x + d[0], z + d[1]))) return null;
             }
-            return "New claims must touch your nation on a north/south/east/west side.";
+            if (touchesControlledCity(side, dim, x, z)) return null;
+
+            return "New claims must touch territory connected to your capital or a controlled strategic city on a north/south/east/west side.";
         }
 
         if (action == ClaimingAction.UNCLAIM) {
@@ -341,6 +632,15 @@ public final class WarManager {
         return null;
     }
 
+    private boolean hasValidAnchorInDimension(OpacSides.Side side, ResourceLocation dim) {
+        CapitalRecord capital = side.partyId() == null ? null : data.getCapital(side.partyId());
+        if (capital != null && capital.dimension.equals(dim)) return true;
+        for (StrategicCity city : data.cities()) {
+            if (city.dimension.equals(dim) && city.isControlledBy(side.partyId())) return true;
+        }
+        return false;
+    }
+
     private boolean sideHasAnyClaimInDimension(IServerClaimsManagerAPI claims, OpacSides.Side side, ResourceLocation dim) {
         return claims.getPlayerInfoStream().anyMatch(info -> {
             if (!OpacSides.isMember(server, info.getPlayerId(), side.partyId(), side.ownerId())) return false;
@@ -357,21 +657,35 @@ public final class WarManager {
         return OpacSides.sameSide(side, OpacSides.claimSide(server, claim));
     }
 
-    private Set<ChunkPos> capitalConnectedClaims(IServerClaimsManagerAPI claims, OpacSides.Side side,
-                                                 ResourceLocation dim, @Nullable ChunkPos ignored) {
+    private boolean touchesControlledCity(OpacSides.Side side, ResourceLocation dim, int x, int z) {
+        for (int[] d : CARDINAL) {
+            StrategicCity city = cityAtChunk(dim, x + d[0], z + d[1]);
+            if (city != null && city.isControlledBy(side.partyId())) return true;
+        }
+        return false;
+    }
+
+    private Set<ChunkPos> validConnectedClaims(IServerClaimsManagerAPI claims, OpacSides.Side side,
+                                               ResourceLocation dim, @Nullable ChunkPos ignored) {
         Set<ChunkPos> visited = new HashSet<>();
+        ArrayDeque<ChunkPos> queue = new ArrayDeque<>();
+
         if (side.partyId() == null) return visited;
 
         CapitalRecord capital = data.getCapital(side.partyId());
-        if (capital == null || !capital.dimension.equals(dim)) return visited;
+        if (capital != null && capital.dimension.equals(dim)) {
+            ChunkPos root = new ChunkPos(capital.chunkX, capital.chunkZ);
+            if ((ignored == null || !root.equals(ignored))
+                    && isFriendlyClaim(claims, side, dim, root.x, root.z)) {
+                visited.add(root);
+                queue.add(root);
+            }
+        }
 
-        ChunkPos root = new ChunkPos(capital.chunkX, capital.chunkZ);
-        if (ignored != null && root.equals(ignored)) return visited;
-        if (!isFriendlyClaim(claims, side, dim, root.x, root.z)) return visited;
-
-        ArrayDeque<ChunkPos> queue = new ArrayDeque<>();
-        visited.add(root);
-        queue.add(root);
+        for (StrategicCity city : data.cities()) {
+            if (!city.dimension.equals(dim) || !city.isControlledBy(side.partyId())) continue;
+            addCityAdjacentClaimSeeds(claims, side, city, ignored, visited, queue);
+        }
 
         while (!queue.isEmpty()) {
             ChunkPos at = queue.removeFirst();
@@ -384,20 +698,84 @@ public final class WarManager {
                 queue.addLast(next);
             }
         }
+
         return visited;
     }
 
-    private int attackDistanceFromCapitalNetwork(IServerClaimsManagerAPI claims, OpacSides.Side side,
-                                                 ResourceLocation dim, ChunkPos target) {
-        Set<ChunkPos> connected = capitalConnectedClaims(claims, side, dim, null);
-        if (connected.isEmpty()) return -1;
-
-        int best = Integer.MAX_VALUE;
-        for (ChunkPos cp : connected) {
-            int distance = Math.abs(cp.x - target.x) + Math.abs(cp.z - target.z);
-            if (distance < best) best = distance;
+    private void addCityAdjacentClaimSeeds(IServerClaimsManagerAPI claims, OpacSides.Side side, StrategicCity city,
+                                           @Nullable ChunkPos ignored, Set<ChunkPos> visited, ArrayDeque<ChunkPos> queue) {
+        for (int x = city.minChunkX; x <= city.maxChunkX; x++) {
+            addClaimSeed(claims, side, city.dimension, new ChunkPos(x, city.minChunkZ - 1), ignored, visited, queue);
+            addClaimSeed(claims, side, city.dimension, new ChunkPos(x, city.maxChunkZ + 1), ignored, visited, queue);
         }
-        return best;
+        for (int z = city.minChunkZ; z <= city.maxChunkZ; z++) {
+            addClaimSeed(claims, side, city.dimension, new ChunkPos(city.minChunkX - 1, z), ignored, visited, queue);
+            addClaimSeed(claims, side, city.dimension, new ChunkPos(city.maxChunkX + 1, z), ignored, visited, queue);
+        }
+    }
+
+    private void addClaimSeed(IServerClaimsManagerAPI claims, OpacSides.Side side, ResourceLocation dim,
+                              ChunkPos seed, @Nullable ChunkPos ignored, Set<ChunkPos> visited, ArrayDeque<ChunkPos> queue) {
+        if (ignored != null && seed.equals(ignored)) return;
+        if (visited.contains(seed)) return;
+        if (!isFriendlyClaim(claims, side, dim, seed.x, seed.z)) return;
+        visited.add(seed);
+        queue.add(seed);
+    }
+
+    private int attackDistanceFromValidTerritory(IServerClaimsManagerAPI claims, OpacSides.Side side,
+                                                 ResourceLocation dim, ChunkPos target) {
+        Set<ChunkPos> connected = validConnectedClaims(claims, side, dim, null);
+        int best = Integer.MAX_VALUE;
+
+        for (ChunkPos cp : connected) {
+            best = Math.min(best, manhattan(cp.x, cp.z, target.x, target.z));
+        }
+
+        for (StrategicCity city : data.cities()) {
+            if (!city.dimension.equals(dim) || !city.isControlledBy(side.partyId())) continue;
+            best = Math.min(best, distanceChunkToCity(target, city));
+        }
+
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private int attackDistanceToCity(IServerClaimsManagerAPI claims, OpacSides.Side side, StrategicCity targetCity) {
+        Set<ChunkPos> connected = validConnectedClaims(claims, side, targetCity.dimension, null);
+        int best = Integer.MAX_VALUE;
+
+        for (ChunkPos cp : connected) {
+            best = Math.min(best, distanceChunkToCity(cp, targetCity));
+        }
+
+        for (StrategicCity anchor : data.cities()) {
+            if (!anchor.dimension.equals(targetCity.dimension)
+                    || !anchor.isControlledBy(side.partyId())
+                    || anchor.id.equalsIgnoreCase(targetCity.id)) {
+                continue;
+            }
+            best = Math.min(best, distanceBetweenCities(anchor, targetCity));
+        }
+
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private int distanceChunkToCity(ChunkPos cp, StrategicCity city) {
+        int dx = cp.x < city.minChunkX ? city.minChunkX - cp.x : Math.max(0, cp.x - city.maxChunkX);
+        int dz = cp.z < city.minChunkZ ? city.minChunkZ - cp.z : Math.max(0, cp.z - city.maxChunkZ);
+        return dx + dz;
+    }
+
+    private int distanceBetweenCities(StrategicCity a, StrategicCity b) {
+        int dx = a.maxChunkX < b.minChunkX ? b.minChunkX - a.maxChunkX
+                : b.maxChunkX < a.minChunkX ? a.minChunkX - b.maxChunkX : 0;
+        int dz = a.maxChunkZ < b.minChunkZ ? b.minChunkZ - a.maxChunkZ
+                : b.maxChunkZ < a.minChunkZ ? a.minChunkZ - b.maxChunkZ : 0;
+        return dx + dz;
+    }
+
+    private int manhattan(int x1, int z1, int x2, int z2) {
+        return Math.abs(x1 - x2) + Math.abs(z1 - z2);
     }
 
     private boolean wouldDisconnectTerritory(IServerClaimsManagerAPI claims, OpacSides.Side side,
@@ -439,7 +817,7 @@ public final class WarManager {
     }
 
     public void adminStop(WarRecord war, boolean restoreDefender) {
-        if (restoreDefender) restoreOriginalClaim(war);
+        if (restoreDefender && !war.isCityWar()) restoreOriginalClaim(war);
         data.remove(war.id);
         broadcast(Component.literal("WAR: battle at [" + war.chunkX + ", " + war.chunkZ + "] was stopped.")
                 .withStyle(ChatFormatting.YELLOW));
@@ -451,9 +829,30 @@ public final class WarManager {
     }
 
     private void activate(WarRecord war) {
+        if (war.isCityWar()) {
+            StrategicCity city = data.getCity(war.cityId);
+            if (city == null
+                    || !Objects.equals(city.controllerPartyId, war.defenderPartyId)
+                    || !Objects.equals(city.controllerOwnerId, war.defenderOwnerId)) {
+                data.remove(war.id);
+                broadcast(Component.literal("CITY WAR: battle cancelled because city control changed before activation.")
+                        .withStyle(ChatFormatting.RED));
+                return;
+            }
+
+            war.phase = WarPhase.ACTIVE;
+            war.progress = 0.5D;
+            data.changed();
+            broadcast(Component.literal("CITY WAR ACTIVE: " + attackerName(war) + " is assaulting " + city.id
+                    + " (" + defenderName(war) + "). Capture chunk [" + war.chunkX + ", " + war.chunkZ + "] at Y="
+                    + war.captureY + " +/-" + WarConfig.CAPTURE_VERTICAL_TOLERANCE.get() + ".")
+                    .withStyle(ChatFormatting.DARK_PURPLE, ChatFormatting.BOLD));
+            return;
+        }
+
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         IPlayerChunkClaimAPI current = claims.get(war.dimension, war.chunkX, war.chunkZ);
-        if (current == null || !current.getPlayerId().equals(war.originalClaimOwner)) {
+        if (current == null || war.originalClaimOwner == null || !current.getPlayerId().equals(war.originalClaimOwner)) {
             data.remove(war.id);
             broadcast(Component.literal("WAR: battle cancelled because target ownership changed before activation.")
                     .withStyle(ChatFormatting.RED));
@@ -473,12 +872,41 @@ public final class WarManager {
     }
 
     private void finish(WarRecord war, boolean attackerWon) {
+        if (war.isCityWar()) {
+            StrategicCity city = data.getCity(war.cityId);
+            if (city == null) {
+                data.remove(war.id);
+                return;
+            }
+
+            if (attackerWon) {
+                String previous = cityControllerName(city);
+                city.controllerPartyId = war.attackerPartyId;
+                city.controllerOwnerId = war.attackerOwnerId;
+                data.remove(war.id);
+                data.changed();
+                broadcast(Component.literal("CITY CAPTURED: " + attackerName(war) + " took " + city.id
+                        + " from " + previous + ". The city is now a territorial anchor for " + attackerName(war) + ".")
+                        .withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD));
+            } else {
+                data.remove(war.id);
+                broadcast(Component.literal("CITY DEFENDED: " + city.id + " remains controlled by " + cityControllerName(city) + ".")
+                        .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+            }
+            return;
+        }
+
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         UUID newOwner = attackerWon ? war.attackerOwnerId : war.originalClaimOwner;
+        if (newOwner == null) {
+            data.remove(war.id);
+            return;
+        }
+
         int sub = attackerWon ? 0 : war.originalSubConfig;
         boolean forceload = attackerWon ? false : war.originalForceload;
-
         claims.claim(war.dimension, newOwner, sub, war.chunkX, war.chunkZ, forceload);
+
         boolean capturedCapital = attackerWon
                 && war.defenderPartyId != null
                 && isCapitalChunk(war.defenderPartyId, war.dimension, war.chunkX, war.chunkZ);
@@ -490,9 +918,7 @@ public final class WarManager {
                 : "WAR DEFENDED: " + defenderName(war) + " held chunk [" + war.chunkX + ", " + war.chunkZ + "] against " + attackerName(war) + ".")
                 .withStyle(attackerWon ? ChatFormatting.GREEN : ChatFormatting.AQUA, ChatFormatting.BOLD));
 
-        if (capturedCapital) {
-            collapseNation(war.defenderPartyId, war.defenderOwnerId);
-        }
+        if (capturedCapital) collapseNation(war.defenderPartyId, war.defenderOwnerId);
     }
 
     private boolean isCapitalChunk(UUID partyId, ResourceLocation dim, int x, int z) {
@@ -500,14 +926,21 @@ public final class WarManager {
         return capital != null && capital.targets(dim, x, z);
     }
 
-    private void collapseNation(UUID partyId, UUID ownerId) {
+    private void collapseNation(UUID partyId, @Nullable UUID ownerId) {
         String name = OpacSides.sideName(server, partyId, ownerId);
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        OpacSides.Side losingSide = new OpacSides.Side(partyId, ownerId, name);
+        OpacSides.Side losingSide = new OpacSides.Side(partyId, ownerId == null ? partyId : ownerId, name);
 
         List<ClaimLocation> ownedClaims = collectClaimsForSide(claims, losingSide);
         for (ClaimLocation location : ownedClaims) {
             claims.unclaim(location.dimension, location.x, location.z);
+        }
+
+        for (StrategicCity city : data.cities()) {
+            if (partyId.equals(city.controllerPartyId)) {
+                city.controllerPartyId = null;
+                city.controllerOwnerId = null;
+            }
         }
 
         List<WarRecord> otherWars = new ArrayList<>(data.wars());
@@ -516,18 +949,21 @@ public final class WarManager {
             boolean losingDefender = partyId.equals(other.defenderPartyId);
             if (!losingAttacker && !losingDefender) continue;
 
-            if (losingAttacker) {
-                if (other.phase == WarPhase.ACTIVE) restoreOriginalClaim(other);
-            } else if (losingDefender && other.phase == WarPhase.ACTIVE) {
-                claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
+            if (!other.isCityWar()) {
+                if (losingAttacker && other.phase == WarPhase.ACTIVE) {
+                    restoreOriginalClaim(other);
+                } else if (losingDefender && other.phase == WarPhase.ACTIVE) {
+                    claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
+                }
             }
-
             data.remove(other.id);
         }
 
         data.removeCapital(partyId);
+        data.changed();
+
         broadcast(Component.literal("CAPITAL FALLEN: " + name
-                + " lost its capital. All remaining national claims were removed.")
+                + " lost its capital. All remaining national claims were removed and its strategic cities became neutral.")
                 .withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD));
     }
 
@@ -545,6 +981,7 @@ public final class WarManager {
     }
 
     private void restoreOriginalClaim(WarRecord war) {
+        if (war.originalClaimOwner == null) return;
         OpenPACServerAPI.get(server).getServerClaimsManager().claim(
                 war.dimension,
                 war.originalClaimOwner,
@@ -556,6 +993,7 @@ public final class WarManager {
 
     private void tickSecond() {
         tickCapitalMarkers();
+        tickCityMarkers();
 
         List<WarRecord> snapshot = new ArrayList<>(data.wars());
         for (WarRecord war : snapshot) {
@@ -563,7 +1001,12 @@ public final class WarManager {
             if (level == null) continue;
 
             if (!war.capturePointSet) {
-                setCapturePoint(war, level);
+                if (war.isCityWar()) {
+                    StrategicCity city = data.getCity(war.cityId);
+                    if (city != null) setCityWarCapturePoint(war, city);
+                } else {
+                    setCapturePoint(war, level);
+                }
                 data.changed();
             }
             showCaptureObjective(war, level);
@@ -640,9 +1083,35 @@ public final class WarManager {
         }
     }
 
+    private void tickCityMarkers() {
+        for (StrategicCity city : new ArrayList<>(data.cities())) {
+            ServerLevel level = level(city.dimension);
+            if (level == null) continue;
+
+            int x = (city.captureChunkX << 4) + 8;
+            int z = (city.captureChunkZ << 4) + 8;
+            level.sendParticles(ParticleTypes.ENCHANT, x + 0.5D, city.captureY + 1.0D, z + 0.5D,
+                    12, 1.6D, 1.0D, 1.6D, 0.02D);
+
+            String controller = cityControllerName(city);
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (!player.level().dimension().location().equals(city.dimension)) continue;
+                ChunkPos cp = player.chunkPosition();
+                if (city.containsChunk(city.dimension, cp.x, cp.z)) {
+                    player.displayClientMessage(
+                            Component.literal("◆ STRATEGIC CITY — " + city.id + " — " + controller + " ◆")
+                                    .withStyle(ChatFormatting.LIGHT_PURPLE, ChatFormatting.BOLD),
+                            true);
+                }
+            }
+        }
+    }
+
     private void notifyPlayersInWar(WarRecord war, int attackers, int defenders) {
         int pct = (int)Math.round(war.progress * 100D);
+        String target = war.isCityWar() ? " | CITY:" + war.cityId : "";
         Component msg = Component.literal(attackerName(war) + " vs " + defenderName(war)
+                + target
                 + " | " + pct + "% attacker control"
                 + " | A:" + attackers + " D:" + defenders
                 + " | Y=" + war.captureY + " +/-" + WarConfig.CAPTURE_VERTICAL_TOLERANCE.get())
@@ -696,7 +1165,7 @@ public final class WarManager {
 
     public record CaptureCounts(int attackers, int defenders) {}
 
-    public record StartResult(boolean success, String message, WarRecord war) {
+    public record StartResult(boolean success, String message, @Nullable WarRecord war) {
         public static StartResult fail(String message) {
             return new StartResult(false, message, null);
         }
@@ -706,13 +1175,23 @@ public final class WarManager {
         }
     }
 
-    public record CapitalResult(boolean success, String message, CapitalRecord capital) {
+    public record CapitalResult(boolean success, String message, @Nullable CapitalRecord capital) {
         public static CapitalResult fail(String message) {
             return new CapitalResult(false, message, null);
         }
 
         public static CapitalResult ok(CapitalRecord capital) {
             return new CapitalResult(true, "Capital established.", capital);
+        }
+    }
+
+    public record CityResult(boolean success, String message, @Nullable StrategicCity city, int protectedBlockCount) {
+        public static CityResult fail(String message) {
+            return new CityResult(false, message, null, 0);
+        }
+
+        public static CityResult ok(StrategicCity city, int protectedBlockCount) {
+            return new CityResult(true, "Strategic city updated.", city, protectedBlockCount);
         }
     }
 

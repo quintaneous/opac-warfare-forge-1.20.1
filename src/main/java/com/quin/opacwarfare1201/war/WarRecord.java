@@ -3,6 +3,7 @@ package com.quin.opacwarfare1201.war;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 
+import javax.annotation.Nullable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -14,11 +15,12 @@ public final class WarRecord {
     public int chunkZ;
     public UUID attackerPartyId;
     public UUID attackerOwnerId;
-    public UUID defenderPartyId;
-    public UUID defenderOwnerId;
-    public UUID originalClaimOwner;
+    @Nullable public UUID defenderPartyId;
+    @Nullable public UUID defenderOwnerId;
+    @Nullable public UUID originalClaimOwner;
     public int originalSubConfig;
     public boolean originalForceload;
+    @Nullable public String cityId;
     public WarPhase phase;
     public long activateAtGameTime;
     public double progress;
@@ -36,6 +38,10 @@ public final class WarRecord {
         return dimension.equals(dim) && chunkX == x && chunkZ == z;
     }
 
+    public boolean isCityWar() {
+        return cityId != null && !cityId.isBlank();
+    }
+
     public CompoundTag save() {
         CompoundTag t = new CompoundTag();
         t.putUUID("id", id);
@@ -45,8 +51,9 @@ public final class WarRecord {
         t.putUUID("attackerParty", attackerPartyId);
         t.putUUID("attackerOwner", attackerOwnerId);
         if (defenderPartyId != null) t.putUUID("defenderParty", defenderPartyId);
-        t.putUUID("defenderOwner", defenderOwnerId);
-        t.putUUID("originalOwner", originalClaimOwner);
+        if (defenderOwnerId != null) t.putUUID("defenderOwner", defenderOwnerId);
+        if (originalClaimOwner != null) t.putUUID("originalOwner", originalClaimOwner);
+        if (cityId != null) t.putString("cityId", cityId);
         t.putInt("originalSub", originalSubConfig);
         t.putBoolean("originalForceload", originalForceload);
         t.putString("phase", phase.name());
@@ -72,8 +79,9 @@ public final class WarRecord {
         w.attackerPartyId = t.getUUID("attackerParty");
         w.attackerOwnerId = t.getUUID("attackerOwner");
         w.defenderPartyId = t.hasUUID("defenderParty") ? t.getUUID("defenderParty") : null;
-        w.defenderOwnerId = t.getUUID("defenderOwner");
-        w.originalClaimOwner = t.getUUID("originalOwner");
+        w.defenderOwnerId = t.hasUUID("defenderOwner") ? t.getUUID("defenderOwner") : null;
+        w.originalClaimOwner = t.hasUUID("originalOwner") ? t.getUUID("originalOwner") : null;
+        w.cityId = t.contains("cityId") ? t.getString("cityId") : null;
         w.originalSubConfig = t.getInt("originalSub");
         w.originalForceload = t.getBoolean("originalForceload");
         try { w.phase = WarPhase.valueOf(t.getString("phase")); } catch (Exception e) { w.phase = WarPhase.PREPARING; }

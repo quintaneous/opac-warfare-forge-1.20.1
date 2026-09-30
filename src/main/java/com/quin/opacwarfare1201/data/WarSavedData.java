@@ -1,6 +1,7 @@
 package com.quin.opacwarfare1201.data;
 
 import com.quin.opacwarfare1201.war.CapitalRecord;
+import com.quin.opacwarfare1201.war.StrategicCity;
 import com.quin.opacwarfare1201.war.WarRecord;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -17,6 +18,7 @@ public final class WarSavedData extends SavedData {
     public static final String NAME = "opac_warfare_1201";
     private final Map<UUID, WarRecord> wars = new LinkedHashMap<>();
     private final Map<UUID, CapitalRecord> capitals = new LinkedHashMap<>();
+    private final Map<String, StrategicCity> cities = new LinkedHashMap<>();
 
     public Collection<WarRecord> wars() { return wars.values(); }
     public WarRecord get(UUID id) { return wars.get(id); }
@@ -42,6 +44,29 @@ public final class WarSavedData extends SavedData {
         return removed;
     }
 
+    public Collection<StrategicCity> cities() { return cities.values(); }
+
+    @Nullable
+    public StrategicCity getCity(String id) {
+        return cities.get(id.toLowerCase());
+    }
+
+    public boolean hasCity(String id) {
+        return cities.containsKey(id.toLowerCase());
+    }
+
+    public void putCity(StrategicCity city) {
+        cities.put(city.id.toLowerCase(), city);
+        setDirty();
+    }
+
+    @Nullable
+    public StrategicCity removeCity(String id) {
+        StrategicCity removed = cities.remove(id.toLowerCase());
+        if (removed != null) setDirty();
+        return removed;
+    }
+
     public void changed() { setDirty(); }
 
     @Override
@@ -53,6 +78,10 @@ public final class WarSavedData extends SavedData {
         ListTag capitalList = new ListTag();
         for (CapitalRecord capital : capitals.values()) capitalList.add(capital.save());
         tag.put("capitals", capitalList);
+
+        ListTag cityList = new ListTag();
+        for (StrategicCity city : cities.values()) cityList.add(city.save());
+        tag.put("cities", cityList);
         return tag;
     }
 
@@ -69,6 +98,12 @@ public final class WarSavedData extends SavedData {
         for (Tag e : capitalList) {
             CapitalRecord capital = CapitalRecord.load((CompoundTag)e);
             data.capitals.put(capital.partyId, capital);
+        }
+
+        ListTag cityList = tag.getList("cities", Tag.TAG_COMPOUND);
+        for (Tag e : cityList) {
+            StrategicCity city = StrategicCity.load((CompoundTag)e);
+            data.cities.put(city.id.toLowerCase(), city);
         }
 
         return data;
