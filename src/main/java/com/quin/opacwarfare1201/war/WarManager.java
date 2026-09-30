@@ -297,13 +297,9 @@ public final class WarManager {
         }
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        int distance = attackDistanceToCity(claims, attackerSide, city);
-        if (distance < 0) {
-            return StartResult.fail("Your nation has no valid capital- or city-anchored territory in this dimension.");
-        }
-        if (distance > WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get()) {
-            return StartResult.fail(city.id + " is " + distance + " chunks from your valid territory; Season 1 maximum is "
-                    + WarConfig.MAX_ATTACK_DISTANCE_CHUNKS.get() + ".");
+        if (!hasValidTerritoryBorderingCity(claims, attackerSide, city)) {
+            return StartResult.fail("To attack " + city.id
+                    + ", your capital- or city-connected territory must directly border the strategic city.");
         }
 
         WarRecord war = new WarRecord(UUID.randomUUID());
@@ -738,6 +734,22 @@ public final class WarManager {
         }
 
         return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private boolean hasValidTerritoryBorderingCity(IServerClaimsManagerAPI claims, OpacSides.Side side,
+                                                    StrategicCity city) {
+        Set<ChunkPos> valid = validConnectedClaims(claims, side, city.dimension, null);
+        if (valid.isEmpty()) return false;
+
+        for (int x = city.minChunkX; x <= city.maxChunkX; x++) {
+            if (valid.contains(new ChunkPos(x, city.minChunkZ - 1))) return true;
+            if (valid.contains(new ChunkPos(x, city.maxChunkZ + 1))) return true;
+        }
+        for (int z = city.minChunkZ; z <= city.maxChunkZ; z++) {
+            if (valid.contains(new ChunkPos(city.minChunkX - 1, z))) return true;
+            if (valid.contains(new ChunkPos(city.maxChunkX + 1, z))) return true;
+        }
+        return false;
     }
 
     private int attackDistanceToCity(IServerClaimsManagerAPI claims, OpacSides.Side side, StrategicCity targetCity) {
