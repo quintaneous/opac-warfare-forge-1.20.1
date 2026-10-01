@@ -23,6 +23,16 @@ public final class StrategicCity {
     @Nullable public UUID controllerPartyId;
     @Nullable public UUID controllerOwnerId;
     public final Set<Long> protectedBlocks = new HashSet<>();
+    /**
+     * Blocks added after the city was created. These are siege fortifications:
+     * budget-limited in peacetime and destructible during an ACTIVE city siege.
+     */
+    public final Set<Long> fortificationBlocks = new HashSet<>();
+    /**
+     * False only for cities saved before fortification accounting existed.
+     * The first server load performs a one-time scan to migrate those cities.
+     */
+    public boolean fortificationTrackingInitialized;
 
     public StrategicCity(String id) {
         this.id = id;
@@ -65,6 +75,12 @@ public final class StrategicCity {
         int i = 0;
         for (long pos : protectedBlocks) protectedArray[i++] = pos;
         t.putLongArray("protectedBlocks", protectedArray);
+
+        long[] fortificationArray = new long[fortificationBlocks.size()];
+        i = 0;
+        for (long pos : fortificationBlocks) fortificationArray[i++] = pos;
+        t.putLongArray("fortificationBlocks", fortificationArray);
+        t.putBoolean("fortificationTrackingInitialized", fortificationTrackingInitialized);
         return t;
     }
 
@@ -81,6 +97,8 @@ public final class StrategicCity {
         city.controllerPartyId = t.hasUUID("controllerPartyId") ? t.getUUID("controllerPartyId") : null;
         city.controllerOwnerId = t.hasUUID("controllerOwnerId") ? t.getUUID("controllerOwnerId") : null;
         for (long pos : t.getLongArray("protectedBlocks")) city.protectedBlocks.add(pos);
+        for (long pos : t.getLongArray("fortificationBlocks")) city.fortificationBlocks.add(pos);
+        city.fortificationTrackingInitialized = t.getBoolean("fortificationTrackingInitialized");
         return city;
     }
 }
