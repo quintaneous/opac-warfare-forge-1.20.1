@@ -92,6 +92,98 @@ public final class WarManager {
         return city != null && city.isProtected(pos);
     }
 
+    /**
+     * The balance target discussed for the first city test is 5,000 blocks for
+     * a 3x3 city. Scale linearly for other admin-defined city sizes.
+     */
+    public int fortificationBudget(StrategicCity city) {
+        int chunksWide = city.maxChunkX - city.minChunkX + 1;
+        int chunksDeep = city.maxChunkZ - city.minChunkZ + 1;
+        int chunks = Math.max(1, chunksWide * chunksDeep);
+        int base = WarConfig.CITY_FORTIFICATION_BUDGET_3X3.get();
+        if (base <= 0) return 0;
+        return Math.max(1, (int)Math.ceil(base * (chunks / 9.0D)));
+    }
+
+    public int fortificationCount(StrategicCity city) {
+        ServerLevel cityLevel = level(city.dimension);
+        if (cityLevel != null) {
+            ensureFortificationTracking(cityLevel, city);
+            pruneFortificationTracking(cityLevel, city);
+        }
+        return city.fortificationBlocks.size();
+    }
+
+    /**
+     * Called after Forge observes a placement. Returning false cancels and
+     * rolls back the placement. Original city snapshot blocks never consume
+     * fortification budget.
+     */
+    public boolean registerCityFortification(ServerLevel level, BlockPos pos) {
+        StrategicCity city = cityAtBlock(level.dimension().location(), pos);
+        if (city == null || city.isProtected(pos)) return true;
+        if (anyWarForCity(city.id) != null) return false;
+
+        ensureFortificationTracking(level, city);
+        pruneFortificationTracking(level, city);
+
+        long packed = pos.asLong();
+        if (city.fortificationBlocks.contains(packed)) return true;
+
+        int budget = fortificationBudget(city);
+        if (city.fortificationBlocks.size() >= budget) return false;
+
+        city.fortificationBlocks.add(packed);
+        data.changed();
+        return true;
+    }
+
+    public void releaseCityFortification(ServerLevel level, BlockPos pos) {
+        StrategicCity city = cityAtBlock(level.dimension().location(), pos);
+        if (city == null) return;
+        if (city.fortificationBlocks.remove(pos.asLong())) data.changed();
+    }
+
+    private void ensureFortificationTracking(ServerLevel level, StrategicCity city) {
+        if (city.fortificationTrackingInitialized) return;
+
+        city.fortificationBlocks.clear();
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int cx = city.minChunkX; cx <= city.maxChunkX; cx++) {
+            int blockMinX = cx << 4;
+            for (int cz = city.minChunkZ; cz <= city.maxChunkZ; cz++) {
+                int blockMinZ = cz << 4;
+                for (int x = blockMinX; x < blockMinX + 16; x++) {
+                    for (int z = blockMinZ; z < blockMinZ + 16; z++) {
+                        for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++) {
+                            pos.set(x, y, z);
+                            if (city.isProtected(pos)) continue;
+                            BlockState state = level.getBlockState(pos);
+                            if (!state.isAir() && state.getFluidState().isEmpty()) {
+                                city.fortificationBlocks.add(pos.asLong());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        city.fortificationTrackingInitialized = true;
+        data.changed();
+        OpacWarfare1201.LOGGER.info("Initialized fortification accounting for city {}: {} / {} blocks",
+                city.id, city.fortificationBlocks.size(), fortificationBudget(city));
+    }
+
+    private void pruneFortificationTracking(ServerLevel level, StrategicCity city) {
+        boolean changed = city.fortificationBlocks.removeIf(packed -> {
+            BlockPos pos = BlockPos.of(packed);
+            if (!city.containsBlock(city.dimension, pos) || city.isProtected(pos)) return true;
+            BlockState state = level.getBlockState(pos);
+            return state.isAir() || !state.getFluidState().isEmpty();
+        });
+        if (changed) data.changed();
+    }
+
     public boolean canPlayerAccessCityChunk(UUID playerId, ResourceLocation dim, int x, int z) {
         StrategicCity city = cityAtChunk(dim, x, z);
         if (city == null) return false;
@@ -117,6 +209,14 @@ public final class WarManager {
                 changed = true;
             }
         }
+        for (StrategicCity city : data.cities()) {
+            ServerLevel cityLevel = level(city.dimension);
+            if (cityLevel != null) {
+                ensureFortificationTracking(cityLevel, city);
+                pruneFortificationTracking(cityLevel, city);
+            }
+        }
+
         if (changed) data.changed();
 
         OpacWarfare1201.LOGGER.info("Loaded {} persisted war(s), {} capital(s), and {} strategic city/cities",
@@ -315,13 +415,18 @@ public final class WarManager {
         setCityWarCapturePoint(war, city);
 
         ServerLevel level = level(city.dimension);
+        if (level != null) {
+            ensureFortificationTracking(level, city);
+            pruneFortificationTracking(level, city);
+        }
         long now = level == null ? server.overworld().getGameTime() : level.getGameTime();
         war.activateAtGameTime = now + WarConfig.PREPARATION_SECONDS.get() * 20L;
         war.progress = 0.5D;
 
         data.put(war);
         broadcast(Component.literal("CITY WAR: " + attackerSide.name() + " is preparing an attack on " + city.id
-                + " (" + cityControllerName(city) + ") at capture chunk [" + city.captureChunkX + ", " + city.captureChunkZ + "].")
+                + " (" + cityControllerName(city) + ") at capture chunk [" + city.captureChunkX + ", " + city.captureChunkZ + "]"
+                + " | fortifications " + fortificationCount(city) + "/" + fortificationBudget(city) + ".")
                 .withStyle(ChatFormatting.LIGHT_PURPLE, ChatFormatting.BOLD));
         return StartResult.ok(war);
     }
@@ -498,6 +603,7 @@ public final class WarManager {
         int captureX = (center.x << 4) + 8;
         int captureZ = (center.z << 4) + 8;
         city.captureY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, captureX, captureZ);
+        city.fortificationTrackingInitialized = true;
 
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int cx = minX; cx <= maxX; cx++) {
