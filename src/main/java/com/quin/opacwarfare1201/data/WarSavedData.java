@@ -19,6 +19,7 @@ public final class WarSavedData extends SavedData {
     private final Map<UUID, WarRecord> wars = new LinkedHashMap<>();
     private final Map<UUID, CapitalRecord> capitals = new LinkedHashMap<>();
     private final Map<String, StrategicCity> cities = new LinkedHashMap<>();
+    private final Map<UUID, Long> attackCooldownUntilEpochMillis = new LinkedHashMap<>();
 
     public Collection<WarRecord> wars() { return wars.values(); }
     public WarRecord get(UUID id) { return wars.get(id); }
@@ -67,6 +68,20 @@ public final class WarSavedData extends SavedData {
         return removed;
     }
 
+    public long attackCooldownUntil(UUID partyId) {
+        return attackCooldownUntilEpochMillis.getOrDefault(partyId, 0L);
+    }
+
+    public void setAttackCooldownUntil(UUID partyId, long epochMillis) {
+        if (epochMillis <= 0L) attackCooldownUntilEpochMillis.remove(partyId);
+        else attackCooldownUntilEpochMillis.put(partyId, epochMillis);
+        setDirty();
+    }
+
+    public void clearAttackCooldown(UUID partyId) {
+        if (attackCooldownUntilEpochMillis.remove(partyId) != null) setDirty();
+    }
+
     public void changed() { setDirty(); }
 
     @Override
@@ -82,6 +97,15 @@ public final class WarSavedData extends SavedData {
         ListTag cityList = new ListTag();
         for (StrategicCity city : cities.values()) cityList.add(city.save());
         tag.put("cities", cityList);
+
+        ListTag cooldownList = new ListTag();
+        for (Map.Entry<UUID, Long> entry : attackCooldownUntilEpochMillis.entrySet()) {
+            CompoundTag cooldown = new CompoundTag();
+            cooldown.putUUID("partyId", entry.getKey());
+            cooldown.putLong("until", entry.getValue());
+            cooldownList.add(cooldown);
+        }
+        tag.put("attackCooldowns", cooldownList);
         return tag;
     }
 
@@ -104,6 +128,14 @@ public final class WarSavedData extends SavedData {
         for (Tag e : cityList) {
             StrategicCity city = StrategicCity.load((CompoundTag)e);
             data.cities.put(city.id.toLowerCase(), city);
+        }
+
+        ListTag cooldownList = tag.getList("attackCooldowns", Tag.TAG_COMPOUND);
+        for (Tag e : cooldownList) {
+            CompoundTag cooldown = (CompoundTag)e;
+            if (!cooldown.hasUUID("partyId")) continue;
+            long until = cooldown.getLong("until");
+            if (until > 0L) data.attackCooldownUntilEpochMillis.put(cooldown.getUUID("partyId"), until);
         }
 
         return data;

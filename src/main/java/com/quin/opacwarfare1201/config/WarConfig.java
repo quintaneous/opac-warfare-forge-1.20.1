@@ -17,6 +17,7 @@ public final class WarConfig {
     public static final ForgeConfigSpec.BooleanValue ONLY_ONE_OFFENSIVE_WAR_PER_SIDE;
     public static final ForgeConfigSpec.IntValue EMPTY_DECAY_SECONDS;
     public static final ForgeConfigSpec.IntValue CITY_FORTIFICATION_BUDGET_3X3;
+    public static final ForgeConfigSpec.IntValue FAILED_ATTACK_COOLDOWN_MINUTES;
 
     static {
         ForgeConfigSpec.Builder b = new ForgeConfigSpec.Builder();
@@ -44,6 +45,10 @@ public final class WarConfig {
                         "Fortification block budget for a 3x3-chunk strategic city. Other city sizes scale linearly by chunk count.",
                         "Only blocks added after city creation count; the original city snapshot remains permanent infrastructure.")
                 .defineInRange("cityFortificationBudget3x3", 5000, 0, 100000);
+        FAILED_ATTACK_COOLDOWN_MINUTES = b.comment(
+                        "Minutes an attacking nation must wait before starting another offensive war after it fails to capture a normal chunk or strategic city.",
+                        "Attacker surrender also counts as a failed attack. Successful captures and admin-stopped wars do not apply a cooldown. 0 disables this rule.")
+                .defineInRange("failedAttackCooldownMinutes", 30, 0, 1440);
         b.pop();
 
         b.push("territory");
