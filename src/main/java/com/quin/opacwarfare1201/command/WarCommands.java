@@ -26,6 +26,7 @@ public final class WarCommands {
         d.register(Commands.literal("war")
                 .then(Commands.literal("start").executes(ctx -> start(ctx.getSource())))
                 .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
+                .then(Commands.literal("cooldown").executes(ctx -> cooldown(ctx.getSource())))
                 .then(Commands.literal("surrender").executes(ctx -> surrender(ctx.getSource())))
                 .then(Commands.literal("capital")
                         .then(Commands.literal("set").executes(ctx -> setCapital(ctx.getSource())))
@@ -160,6 +161,32 @@ public final class WarCommands {
             src.sendSuccess(() -> Component.literal(line), false);
         }
         return 1;
+    }
+
+    private static int cooldown(CommandSourceStack src) {
+        try {
+            ServerPlayer player = src.getPlayerOrException();
+            IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(player.getUUID());
+            if (party == null) {
+                src.sendFailure(Component.literal("You are not in an OPaC party."));
+                return 0;
+            }
+
+            long remaining = WarManager.get(src.getServer()).remainingAttackCooldownSeconds(party.getId());
+            if (remaining <= 0L) {
+                src.sendSuccess(() -> Component.literal("Your nation has no offensive-war cooldown.")
+                        .withStyle(ChatFormatting.GREEN), false);
+                return 1;
+            }
+
+            src.sendSuccess(() -> Component.literal("Offensive-war cooldown remaining: "
+                    + WarManager.formatCooldown(remaining) + ".")
+                    .withStyle(ChatFormatting.YELLOW), false);
+            return 1;
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("Cooldown check failed: " + e.getMessage()));
+            return 0;
+        }
     }
 
     private static int setCapital(CommandSourceStack src) {
