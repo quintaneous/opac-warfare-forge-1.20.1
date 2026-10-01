@@ -53,6 +53,7 @@ public final class WarManager {
     }
 
     public Collection<WarRecord> wars() {
+        reconcilePartyState();
         return Collections.unmodifiableCollection(data.wars());
     }
 
@@ -74,6 +75,7 @@ public final class WarManager {
 
     @Nullable
     public StrategicCity city(String id) {
+        reconcilePartyState();
         return data.getCity(id);
     }
 
