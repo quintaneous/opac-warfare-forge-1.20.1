@@ -1590,6 +1590,7 @@ public final class WarManager {
      */
     private void reconcilePartyState() {
         var partyManager = OpenPACServerAPI.get(server).getPartyManager();
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         boolean changed = false;
 
         Map<UUID, Set<UUID>> liveRosters = new LinkedHashMap<>();
@@ -1636,7 +1637,40 @@ public final class WarManager {
         }
 
         for (Map.Entry<UUID, Set<UUID>> live : liveRosters.entrySet()) {
-            data.setPartyMemberSnapshot(live.getKey(), live.getValue());
+            UUID partyId = live.getKey();
+            Set<UUID> previous = data.partyMemberSnapshots().get(partyId);
+
+            // OPaC physically stores ordinary claims under player UUIDs. If a
+            // member leaves, keep the land with the nation by moving any of
+            // that player's nation-registered claims to the current party owner.
+            if (previous != null) {
+                Set<UUID> departed = new LinkedHashSet<>(previous);
+                departed.removeAll(live.getValue());
+
+                if (!departed.isEmpty()) {
+                    IServerPartyAPI party = partyManager.getPartyById(partyId);
+                    if (party != null) {
+                        UUID newPhysicalOwner = party.getOwner().getUUID();
+                        for (Map.Entry<TerritoryKey, UUID> territory :
+                                new ArrayList<>(data.territoryOwners().entrySet())) {
+                            if (!partyId.equals(territory.getValue())) continue;
+
+                            TerritoryKey key = territory.getKey();
+                            IPlayerChunkClaimAPI claim = claims.get(
+                                    key.dimension(), key.chunkX(), key.chunkZ());
+                            if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) continue;
+                            if (!departed.contains(claim.getPlayerId())) continue;
+
+                            claims.claim(key.dimension(), newPhysicalOwner,
+                                    claim.getSubConfigIndex(), key.chunkX(), key.chunkZ(),
+                                    claim.isForceloadable());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            data.setPartyMemberSnapshot(partyId, live.getValue());
         }
 
         // Capital validity is based on the nation registry, not on the original
@@ -1887,7 +1921,9 @@ public final class WarManager {
         WarRecord war = m.activeWarAt(player.level().dimension().location(), cp.x, cp.z);
         if (war == null || !m.isParticipant(war, player.getUUID(), false) || WarConfig.WAR_LIVES.get() <= 0) return;
 
-        int left = Math.max(0, war.lives.getOrDefault(player.getUUID(), WarConfig.WAR_LIVES.get()) - 1);
+        int current = war.lives.getOrDefault(player.getUUID(), WarConfig.WAR_LIVES.get());
+        if (current <= 0) return;
+        int left = Math.max(0, current - 1);
         war.lives.put(player.getUUID(), left);
         m.data.changed();
 
