@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_17",
   "refmap": "opac_warfare_1201.refmap.json",
   "mixins": [
+    "CreateContraptionSiegeMixin",
     "CBCCannonProjectileContextMixin",
     "CBCBigCannonProjectileMixin",
     "CBCPartialBlockDamageMixin",
