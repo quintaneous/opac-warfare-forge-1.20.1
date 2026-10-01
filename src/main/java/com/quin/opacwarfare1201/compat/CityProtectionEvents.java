@@ -14,6 +14,7 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.level.ExplosionEvent;
 import net.minecraftforge.event.level.PistonEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.registries.ForgeRegistries;
 
 public final class CityProtectionEvents {
     private CityProtectionEvents() {}
@@ -143,18 +144,46 @@ public final class CityProtectionEvents {
 
         WarRecord war = manager.anyWarForCity(city.id);
         if (war != null) {
-            // CBC manual loading physically places projectile/propellant blocks.
-            // Treat those as ammunition state, not construction, so eligible
-            // participants can load/reload manual big cannons during PREPARING
-            // and ACTIVE. The exception is intentionally limited to CBC's own
-            // BigCannonMunitionBlock interface; cannon structure, armor, loaders,
-            // and every other block remain frozen.
-            if (event.getEntity() instanceof ServerPlayer player
-                    && manager.isParticipant(war, player.getUUID(), true)
-                    && CBCMunitionClassifier.isBigCannonMunition(event.getPlacedBlock().getBlock())) {
+            if (!(event.getEntity() instanceof ServerPlayer player)
+                    || !manager.isParticipant(war, player.getUUID(), true)) {
+                event.setCanceled(true);
                 return;
             }
 
+            // CBC manual loading physically places projectile/propellant blocks.
+            // Treat ammunition as loading state rather than construction. Both
+            // sides may load/reload during PREPARING and ACTIVE, and ammunition
+            // never consumes the city's fortification budget.
+            if (CBCMunitionClassifier.isBigCannonMunition(event.getPlacedBlock().getBlock())) {
+                return;
+            }
+
+            // PREPARING remains a hard freeze: defenders get warning time, but
+            // nobody can modify the battlefield before the assault goes live.
+            if (war.phase != WarPhase.ACTIVE) {
+                event.setCanceled(true);
+                return;
+            }
+
+            // During ACTIVE, living/eligible defenders may construct with any
+            // Create or Create: Big Cannons block. This allows field repairs,
+            // mechanical defenses, cannon construction, armor, loaders, etc.
+            // These placements ARE fortifications and therefore consume/free the
+            // same city budget as pre-war defensive construction.
+            if (!manager.isAttacker(war, player.getUUID())
+                    && isCreateOrCbcBlock(event.getPlacedBlock())) {
+                if (!manager.registerCityFortificationDuringActiveSiege(level, event.getPos())) {
+                    event.setCanceled(true);
+                    player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                            "Strategic city fortification budget reached: "
+                                    + manager.fortificationCount(city) + "/"
+                                    + manager.fortificationBudget(city) + " blocks."));
+                }
+                return;
+            }
+
+            // Attackers still cannot build forward positions inside the city,
+            // and defenders cannot spam vanilla/general-purpose blocks.
             event.setCanceled(true);
             return;
         }
@@ -192,6 +221,13 @@ public final class CityProtectionEvents {
             // During ACTIVE, non-permanent fortifications are destructible.
             return war != null && war.phase != WarPhase.ACTIVE;
         });
+    }
+
+    private static boolean isCreateOrCbcBlock(BlockState state) {
+        var key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        if (key == null) return false;
+        String namespace = key.getNamespace();
+        return "create".equals(namespace) || "createbigcannons".equals(namespace);
     }
 
     @SubscribeEvent
