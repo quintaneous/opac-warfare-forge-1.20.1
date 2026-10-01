@@ -148,7 +148,13 @@ public final class WarPermissions {
     }
 
     public static boolean canCreateContraptionDisassemble(Entity contraption) {
-        return canCreateContraptionActors(contraption);
+        if (!(contraption.level() instanceof ServerLevel level)) return true;
+        WarManager manager = WarManager.get(level.getServer());
+
+        // Disassembly writes an entire contraption directly into the world and
+        // bypasses normal placement/budget events. Freeze it for both sides
+        // whenever the contraption intersects a sieged city.
+        return cityWarIntersecting(manager, level, contraption) == null;
     }
 
     @Nullable
