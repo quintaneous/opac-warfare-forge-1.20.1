@@ -6,6 +6,7 @@
   "refmap": "opac_warfare_1201.refmap.json",
   "mixins": [
     "CreateContraptionSiegeMixin",
+    "CreateBlockBreakingSiegeMixin",
     "CBCCannonProjectileContextMixin",
     "CBCBigCannonProjectileMixin",
     "CBCPartialBlockDamageMixin",
