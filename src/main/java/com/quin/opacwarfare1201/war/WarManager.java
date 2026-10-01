@@ -522,13 +522,23 @@ public final class WarManager {
             return StartResult.fail("You must be in an Open Parties and Claims party to start a war.");
         }
 
-        OpacSides.Side defenderSide = OpacSides.claimSide(server, targetClaim);
-        if (OpacSides.sameSide(attackerSide, defenderSide)) {
+        UUID defenderPartyId = territoryPartyAt(dim, target.x, target.z);
+        if (defenderPartyId == null) {
+            return StartResult.fail("That claim is not registered to a nation. An admin should reconcile legacy territory before it can be attacked.");
+        }
+        OpacSides.Side defenderSide = sideForParty(defenderPartyId);
+        if (defenderSide == null) {
+            return StartResult.fail("The target nation's OPaC party no longer exists.");
+        }
+        if (attackerSide.partyId().equals(defenderPartyId)) {
             return StartResult.fail("You cannot attack your own party's claim.");
         }
 
         String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
+
+        String defenseFailure = validateDefenderCapacity(defenderPartyId);
+        if (defenseFailure != null) return StartResult.fail(defenseFailure);
 
         if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
                 && !OpacSides.isOnline(server, defenderSide.partyId(), defenderSide.ownerId())) {
@@ -560,6 +570,7 @@ public final class WarManager {
         war.originalSubConfig = targetClaim.getSubConfigIndex();
         war.originalForceload = targetClaim.isForceloadable();
         war.phase = WarPhase.PREPARING;
+        initializeWarRosters(war);
 
         ServerLevel level = level(dim);
         long now = level == null ? server.overworld().getGameTime() : level.getGameTime();
@@ -596,10 +607,14 @@ public final class WarManager {
         String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
 
-        if (city.controllerPartyId != null
-                && WarConfig.REQUIRE_ONLINE_DEFENDER.get()
-                && !OpacSides.isOnline(server, city.controllerPartyId, city.controllerOwnerId)) {
-            return StartResult.fail("At least one player from the city controller must be online.");
+        if (city.controllerPartyId != null) {
+            String defenseFailure = validateDefenderCapacity(city.controllerPartyId);
+            if (defenseFailure != null) return StartResult.fail(defenseFailure);
+
+            if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
+                    && !OpacSides.isOnline(server, city.controllerPartyId, city.controllerOwnerId)) {
+                return StartResult.fail("At least one player from the city controller must be online.");
+            }
         }
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
@@ -618,6 +633,7 @@ public final class WarManager {
         war.defenderOwnerId = city.controllerOwnerId;
         war.cityId = city.id;
         war.phase = WarPhase.PREPARING;
+        initializeWarRosters(war);
         setCityWarCapturePoint(war, city);
 
         ServerLevel level = level(city.dimension);
@@ -635,6 +651,50 @@ public final class WarManager {
                 + " | fortifications " + fortificationCount(city) + "/" + fortificationBudget(city) + ".")
                 .withStyle(ChatFormatting.LIGHT_PURPLE, ChatFormatting.BOLD));
         return StartResult.ok(war);
+    }
+
+    @Nullable
+    private OpacSides.Side sideForParty(UUID partyId) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party == null) return null;
+        return new OpacSides.Side(party.getId(), party.getOwner().getUUID(), party.getDefaultName());
+    }
+
+    private void initializeWarRosters(WarRecord war) {
+        war.attackerRoster.clear();
+        war.attackerRoster.addAll(snapshotPartyMembers(war.attackerPartyId));
+        if (war.attackerRoster.isEmpty() && war.attackerOwnerId != null) {
+            war.attackerRoster.add(war.attackerOwnerId);
+        }
+
+        war.defenderRoster.clear();
+        if (war.defenderPartyId != null) {
+            war.defenderRoster.addAll(snapshotPartyMembers(war.defenderPartyId));
+            if (war.defenderRoster.isEmpty() && war.defenderOwnerId != null) {
+                war.defenderRoster.add(war.defenderOwnerId);
+            }
+        }
+
+        if (WarConfig.WAR_LIVES.get() > 0) {
+            for (UUID playerId : war.attackerRoster) war.lives.put(playerId, WarConfig.WAR_LIVES.get());
+            for (UUID playerId : war.defenderRoster) war.lives.put(playerId, WarConfig.WAR_LIVES.get());
+        }
+    }
+
+    @Nullable
+    private String validateDefenderCapacity(UUID defenderPartyId) {
+        int max = WarConfig.MAX_CONCURRENT_DEFENSIVE_WARS.get();
+        if (max <= 0) return null;
+
+        int count = 0;
+        for (WarRecord war : data.wars()) {
+            if (defenderPartyId.equals(war.defenderPartyId)) count++;
+        }
+        if (count >= max) {
+            return "That nation is already defending " + count
+                    + " war(s), which is the configured defensive-war limit.";
+        }
+        return null;
     }
 
     @Nullable
