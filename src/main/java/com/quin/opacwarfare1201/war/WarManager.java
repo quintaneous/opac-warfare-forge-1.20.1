@@ -120,9 +120,24 @@ public final class WarManager {
      * fortification budget.
      */
     public boolean registerCityFortification(ServerLevel level, BlockPos pos) {
+        return registerCityFortification(level, pos, false);
+    }
+
+    /**
+     * Variant used for defender-only Create/CBC construction during an ACTIVE
+     * city siege. The normal peacetime path still rejects any placement once a
+     * war exists.
+     */
+    public boolean registerCityFortificationDuringActiveSiege(ServerLevel level, BlockPos pos) {
+        return registerCityFortification(level, pos, true);
+    }
+
+    private boolean registerCityFortification(ServerLevel level, BlockPos pos, boolean allowDuringActiveCityWar) {
         StrategicCity city = cityAtBlock(level.dimension().location(), pos);
         if (city == null || city.isProtected(pos)) return true;
-        if (anyWarForCity(city.id) != null) return false;
+
+        WarRecord war = anyWarForCity(city.id);
+        if (war != null && (!allowDuringActiveCityWar || war.phase != WarPhase.ACTIVE)) return false;
 
         ensureFortificationTracking(level, city);
         pruneFortificationTracking(level, city);
