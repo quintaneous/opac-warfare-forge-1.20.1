@@ -235,7 +235,8 @@ public final class WarCommands {
                     + " | " + city.dimension
                     + " | chunks [" + city.minChunkX + "," + city.minChunkZ + "] to ["
                     + city.maxChunkX + "," + city.maxChunkZ + "]"
-                    + " | capture=[" + city.captureChunkX + "," + city.captureChunkZ + "] Y=" + city.captureY;
+                    + " | capture=[" + city.captureChunkX + "," + city.captureChunkZ + "] Y=" + city.captureY
+                    + " | fortifications=" + m.fortificationCount(city) + "/" + m.fortificationBudget(city);
             src.sendSuccess(() -> Component.literal(line).withStyle(ChatFormatting.LIGHT_PURPLE), false);
         }
         return 1;
@@ -256,7 +257,8 @@ public final class WarCommands {
                 + city.maxChunkX + "," + city.maxChunkZ + "]"
                 + " | capture chunk=[" + city.captureChunkX + "," + city.captureChunkZ + "]"
                 + " | captureY=" + city.captureY
-                + " | permanent blocks=" + city.protectedBlocks.size();
+                + " | permanent blocks=" + city.protectedBlocks.size()
+                + " | fortifications=" + m.fortificationCount(city) + "/" + m.fortificationBudget(city);
         src.sendSuccess(() -> Component.literal(line), false);
         return 1;
     }
@@ -271,8 +273,10 @@ public final class WarCommands {
             }
 
             StrategicCity city = result.city();
+            WarManager manager = WarManager.get(src.getServer());
             src.sendSuccess(() -> Component.literal("Created strategic city " + city.id
-                    + " with " + result.protectedBlockCount() + " permanent protected blocks. It starts Neutral.")
+                    + " with " + result.protectedBlockCount() + " permanent protected blocks. It starts Neutral."
+                    + " Fortification budget=" + manager.fortificationBudget(city) + " blocks.")
                     .withStyle(ChatFormatting.LIGHT_PURPLE), true);
             return 1;
         } catch (Exception e) {
