@@ -1457,6 +1457,10 @@ public final class WarManager {
     }
 
     private void finish(WarRecord war, boolean attackerWon) {
+        finish(war, attackerWon, true);
+    }
+
+    private void finish(WarRecord war, boolean attackerWon, boolean collapseCapturedCapital) {
         if (war.isCityWar()) {
             StrategicCity city = data.getCity(war.cityId);
             if (city == null) {
@@ -1515,7 +1519,9 @@ public final class WarManager {
                 : "WAR DEFENDED: " + defenderName(war) + " held chunk [" + war.chunkX + ", " + war.chunkZ + "] against " + attackerName(war) + ".")
                 .withStyle(attackerWon ? ChatFormatting.GREEN : ChatFormatting.AQUA, ChatFormatting.BOLD));
 
-        if (capturedCapital) collapseNation(war.defenderPartyId, war.defenderOwnerId);
+        if (capturedCapital && collapseCapturedCapital) {
+            collapseNation(war.defenderPartyId, war.defenderOwnerId);
+        }
     }
 
     private boolean isCapitalChunk(UUID partyId, ResourceLocation dim, int x, int z) {
@@ -1614,13 +1620,15 @@ public final class WarManager {
             UUID destroyedPartyId = snapshot.getKey();
             if (liveRosters.containsKey(destroyedPartyId)) continue;
 
-            // Party destruction is surrender, not a way to delete the contested
-            // objective before the opponent can receive it.
+            // Party destruction is surrender, not a way to delete contested
+            // objectives. Suppress normal capital-collapse side effects while
+            // resolving this batch so EVERY already-contested target resolves
+            // before the remaining nation is wiped.
             for (WarRecord war : new ArrayList<>(data.wars())) {
                 if (destroyedPartyId.equals(war.attackerPartyId)) {
-                    finish(war, false);
+                    finish(war, false, false);
                 } else if (destroyedPartyId.equals(war.defenderPartyId)) {
-                    finish(war, true);
+                    finish(war, true, false);
                 }
             }
 
