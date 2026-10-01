@@ -105,7 +105,9 @@ public final class WarSavedData extends SavedData {
     }
 
     public void setPartyMemberSnapshot(UUID partyId, Collection<UUID> members) {
-        partyMemberSnapshots.put(partyId, new LinkedHashSet<>(members));
+        Set<UUID> next = new LinkedHashSet<>(members);
+        if (next.equals(partyMemberSnapshots.get(partyId))) return;
+        partyMemberSnapshots.put(partyId, next);
         setDirty();
     }
 
