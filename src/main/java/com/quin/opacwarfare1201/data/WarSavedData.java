@@ -18,17 +18,25 @@ import java.util.UUID;
 
 public final class WarSavedData extends SavedData {
     public static final String NAME = "opac_warfare_1201";
+    public static final int CURRENT_DATA_VERSION = 2;
+
+    private int loadedDataVersion = CURRENT_DATA_VERSION;
+    private boolean territoryRegistryInitialized;
+
     private final Map<UUID, WarRecord> wars = new LinkedHashMap<>();
     private final Map<UUID, CapitalRecord> capitals = new LinkedHashMap<>();
     private final Map<String, StrategicCity> cities = new LinkedHashMap<>();
+    private final Map<TerritoryKey, UUID> territoryOwners = new LinkedHashMap<>();
     private final Map<UUID, Long> attackCooldownUntilEpochMillis = new LinkedHashMap<>();
     private final Map<UUID, Long> playerAttackCooldownUntilEpochMillis = new LinkedHashMap<>();
     private final Map<UUID, Set<UUID>> partyMemberSnapshots = new LinkedHashMap<>();
 
+    public int loadedDataVersion() { return loadedDataVersion; }
+
     public Collection<WarRecord> wars() { return wars.values(); }
     public WarRecord get(UUID id) { return wars.get(id); }
     public void put(WarRecord war) { wars.put(war.id, war); setDirty(); }
-    public void remove(UUID id) { wars.remove(id); setDirty(); }
+    public void remove(UUID id) { if (wars.remove(id) != null) setDirty(); }
 
     public Collection<CapitalRecord> capitals() { return capitals.values(); }
 
@@ -70,6 +78,35 @@ public final class WarSavedData extends SavedData {
         StrategicCity removed = cities.remove(id.toLowerCase());
         if (removed != null) setDirty();
         return removed;
+    }
+
+    public boolean territoryRegistryInitialized() {
+        return territoryRegistryInitialized;
+    }
+
+    public void markTerritoryRegistryInitialized() {
+        if (!territoryRegistryInitialized) {
+            territoryRegistryInitialized = true;
+            setDirty();
+        }
+    }
+
+    @Nullable
+    public UUID territoryParty(TerritoryKey key) {
+        return territoryOwners.get(key);
+    }
+
+    public Map<TerritoryKey, UUID> territoryOwners() {
+        return territoryOwners;
+    }
+
+    public void setTerritoryParty(TerritoryKey key, UUID partyId) {
+        UUID previous = territoryOwners.put(key, partyId);
+        if (!partyId.equals(previous)) setDirty();
+    }
+
+    public void removeTerritory(TerritoryKey key) {
+        if (territoryOwners.remove(key) != null) setDirty();
     }
 
     public long attackCooldownUntil(UUID partyId) {
@@ -121,6 +158,9 @@ public final class WarSavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag tag) {
+        tag.putInt("dataVersion", CURRENT_DATA_VERSION);
+        tag.putBoolean("territoryRegistryInitialized", territoryRegistryInitialized);
+
         ListTag warList = new ListTag();
         for (WarRecord war : wars.values()) warList.add(war.save());
         tag.put("wars", warList);
@@ -132,6 +172,14 @@ public final class WarSavedData extends SavedData {
         ListTag cityList = new ListTag();
         for (StrategicCity city : cities.values()) cityList.add(city.save());
         tag.put("cities", cityList);
+
+        ListTag territoryList = new ListTag();
+        for (Map.Entry<TerritoryKey, UUID> entry : territoryOwners.entrySet()) {
+            CompoundTag territory = entry.getKey().save();
+            territory.putUUID("partyId", entry.getValue());
+            territoryList.add(territory);
+        }
+        tag.put("territories", territoryList);
 
         ListTag cooldownList = new ListTag();
         for (Map.Entry<UUID, Long> entry : attackCooldownUntilEpochMillis.entrySet()) {
@@ -170,6 +218,8 @@ public final class WarSavedData extends SavedData {
 
     public static WarSavedData load(CompoundTag tag) {
         WarSavedData data = new WarSavedData();
+        data.loadedDataVersion = tag.contains("dataVersion", Tag.TAG_INT) ? tag.getInt("dataVersion") : 0;
+        data.territoryRegistryInitialized = tag.getBoolean("territoryRegistryInitialized");
 
         ListTag warList = tag.getList("wars", Tag.TAG_COMPOUND);
         for (Tag e : warList) {
@@ -187,6 +237,13 @@ public final class WarSavedData extends SavedData {
         for (Tag e : cityList) {
             StrategicCity city = StrategicCity.load((CompoundTag)e);
             data.cities.put(city.id.toLowerCase(), city);
+        }
+
+        ListTag territoryList = tag.getList("territories", Tag.TAG_COMPOUND);
+        for (Tag e : territoryList) {
+            CompoundTag territory = (CompoundTag)e;
+            if (!territory.hasUUID("partyId")) continue;
+            data.territoryOwners.put(TerritoryKey.load(territory), territory.getUUID("partyId"));
         }
 
         ListTag cooldownList = tag.getList("attackCooldowns", Tag.TAG_COMPOUND);
