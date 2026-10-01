@@ -349,19 +349,11 @@ public final class WarManager {
     }
 
     public int claimCountForParty(UUID partyId) {
-        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
-        if (party == null) return 0;
-
-        Set<UUID> members = new HashSet<>();
-        party.getMemberInfoStream().forEach(member -> members.add(member.getUUID()));
-
-        int[] count = {0};
-        OpenPACServerAPI.get(server).getServerClaimsManager().getPlayerInfoStream().forEach(info -> {
-            if (!members.contains(info.getPlayerId())) return;
-            info.getStream().forEach(entry ->
-                    entry.getValue().getStream().forEach(list -> count[0] += list.getCount()));
-        });
-        return count[0];
+        int count = 0;
+        for (UUID owner : data.territoryOwners().values()) {
+            if (partyId.equals(owner)) count++;
+        }
+        return count;
     }
 
     public long remainingAttackCooldownSeconds(UUID partyId) {
@@ -394,10 +386,10 @@ public final class WarManager {
         long until = System.currentTimeMillis() + minutes * 60_000L;
         data.setAttackCooldownUntil(war.attackerPartyId, until);
 
-        IServerPartyAPI attackingParty = OpenPACServerAPI.get(server).getPartyManager().getPartyById(war.attackerPartyId);
-        if (attackingParty != null) {
-            attackingParty.getMemberInfoStream()
-                    .forEach(member -> data.setPlayerAttackCooldownUntil(member.getUUID(), until));
+        if (!war.attackerRoster.isEmpty()) {
+            for (UUID memberId : war.attackerRoster) {
+                data.setPlayerAttackCooldownUntil(memberId, until);
+            }
         } else if (war.attackerOwnerId != null) {
             data.setPlayerAttackCooldownUntil(war.attackerOwnerId, until);
         }
