@@ -7,6 +7,7 @@
   "mixins": [
     "CreateContraptionSiegeMixin",
     "CreateBlockBreakingSiegeMixin",
+    "FlowingFluidSiegeMixin",
     "CBCCannonProjectileContextMixin",
     "CBCBigCannonProjectileMixin",
     "CBCPartialBlockDamageMixin",
