@@ -13,28 +13,33 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * Create contraptions bypass ordinary Forge block place/break events while
- * assembled. Stop their actor world mutations/disassembly inside city sieges
- * unless they are defender-origin machinery already belonging to that city.
- */
 @Pseudo
 @Mixin(targets = "com.simibubi.create.content.contraptions.AbstractContraptionEntity", remap = false)
 public abstract class CreateContraptionSiegeMixin {
     @Inject(method = "tickActors", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
-    private void opacWarfare1201$gateActors(CallbackInfo ci) {
-        if (!WarPermissions.canCreateContraptionActors((Entity)(Object)this)) ci.cancel();
+    private void gateActors(CallbackInfo ci) {
+        Entity self = (Entity)(Object)this;
+        if (!WarPermissions.canCreateContraptionActors(self)) {
+            ci.cancel();
+            return;
+        }
+        WarPermissions.enterCreateContraption(self);
+    }
+
+    @Inject(method = "tickActors", at = @At("RETURN"), remap = false, require = 0)
+    private void finishActors(CallbackInfo ci) {
+        WarPermissions.exitCreateContraption();
     }
 
     @Inject(method = "disassemble", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
-    private void opacWarfare1201$gateDisassembly(CallbackInfo ci) {
+    private void gateDisassembly(CallbackInfo ci) {
         if (!WarPermissions.canCreateContraptionDisassemble((Entity)(Object)this)) ci.cancel();
     }
 
     @Inject(method = "handlePlayerInteraction", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
-    private void opacWarfare1201$gateInteraction(Player player, BlockPos localPos, Direction side,
-                                                  InteractionHand hand,
-                                                  CallbackInfoReturnable<Boolean> cir) {
+    private void gateInteraction(Player player, BlockPos localPos, Direction side,
+                                 InteractionHand hand,
+                                 CallbackInfoReturnable<Boolean> cir) {
         if (!WarPermissions.canUseCreateContraption((Entity)(Object)this, player)) {
             cir.setReturnValue(false);
         }
