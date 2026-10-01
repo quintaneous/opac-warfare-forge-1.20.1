@@ -7,10 +7,12 @@ import com.quin.opacwarfare1201.war.WarRecord;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.level.ExplosionEvent;
+import net.minecraftforge.event.level.PistonEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
 public final class CityProtectionEvents {
@@ -33,7 +35,11 @@ public final class CityProtectionEvents {
         if (city == null) return;
 
         WarRecord war = manager.anyWarForCity(city.id);
-        if (war == null) return;
+        if (war == null) {
+            // Peacetime demolition is allowed. The persisted accounting set is
+            // lazily pruned against the real world before the next budget check.
+            return;
+        }
 
         // PREPARING freezes the battlefield completely.
         if (war.phase != WarPhase.ACTIVE) {
@@ -42,12 +48,28 @@ public final class CityProtectionEvents {
         }
 
         // During ACTIVE, only living/eligible attackers may hand-breach
-        // player-built fortifications. Defenders cannot repair by mining and
-        // replacing blocks mid-siege.
+        // player-built fortifications. Defenders cannot repair/demolish and
+        // rebuild their wall while the assault is underway.
         if (!(event.getPlayer() instanceof ServerPlayer player)
                 || !manager.isAttacker(war, player.getUUID())
                 || !manager.isParticipant(war, player.getUUID(), true)) {
             event.setCanceled(true);
+            return;
+        }
+
+        // Infantry breaching intentionally yields no block/XP drops. Cancel the
+        // vanilla harvest and remove the block server-side without loot.
+        event.setCanceled(true);
+        event.setExpToDrop(0);
+        if (level.destroyBlock(pos, false, player)) {
+            manager.releaseCityFortification(level, pos);
+
+            // Keep the normal one-point tool wear cost even though vanilla
+            // harvesting was replaced to suppress drops.
+            if (!player.isCreative() && !player.getMainHandItem().isEmpty()) {
+                player.getMainHandItem().hurtAndBreak(1, player,
+                        p -> p.broadcastBreakEvent(InteractionHand.MAIN_HAND));
+            }
         }
     }
 
@@ -79,22 +101,36 @@ public final class CityProtectionEvents {
         BlockState state = event.getState();
         float vanillaHardness = state.getDestroySpeed(level, pos);
 
-        // Keep vanilla-unbreakable blocks unbreakable. Zero-hardness blocks
-        // are left alone because vanilla treats them as effectively instant.
         if (vanillaHardness < 0F) {
             event.setCanceled(true);
             return;
         }
         if (vanillaHardness == 0F) return;
 
-        float minimumSeconds = CBCArmorClassifier.minimumSiegeBreakSeconds(level, state, pos);
-        int divisor = player.hasCorrectToolForDrops(state) ? 30 : 100;
+        CBCArmorClassifier.SiegeBreakWindow window =
+                CBCArmorClassifier.siegeBreakWindow(level, state, pos);
 
-        // Vanilla break progress is speed / hardness / divisor per tick.
-        // Capping speed this way guarantees the CBC-derived minimum break
-        // time even with Efficiency V, Haste, or very fast modded tools.
-        float maxAllowedSpeed = vanillaHardness * divisor / (minimumSeconds * 20F);
-        event.setNewSpeed(Math.min(event.getNewSpeed(), maxAllowedSpeed));
+        boolean correctTool = player.hasCorrectToolForDrops(state);
+        int divisor = correctTool ? 30 : 100;
+
+        // Vanilla progress is speed / hardness / divisor per tick.
+        // Upper speed bound = minimum break time: Efficiency/Haste cannot
+        // trivialize a wall.
+        float maxAllowedSpeed =
+                vanillaHardness * divisor / (window.minimumSeconds() * 20F);
+        float adjusted = Math.min(event.getNewSpeed(), maxAllowedSpeed);
+
+        // With the correct tool, also apply the resistance ceiling. This keeps
+        // extreme/modded fortifications breachable by infantry as a fallback,
+        // while wrong-tool mining can still be much slower. Highest CBC tier:
+        // 8s minimum, 10s maximum.
+        if (correctTool) {
+            float minAllowedSpeed =
+                    vanillaHardness * divisor / (window.maximumSeconds() * 20F);
+            adjusted = Math.max(adjusted, minAllowedSpeed);
+        }
+
+        event.setNewSpeed(adjusted);
     }
 
     @SubscribeEvent
@@ -105,11 +141,23 @@ public final class CityProtectionEvents {
         StrategicCity city = manager.cityAtBlock(level.dimension().location(), event.getPos());
         if (city == null) return;
 
-        // No construction by either side from the moment a city war enters PREPARING
-        // until it finishes. This prevents attackers from advancing behind instant walls
-        // and prevents defenders from endlessly repairing/rebuilding during the siege.
+        // The city freezes the instant a siege enters PREPARING. No attacker
+        // instant cover and no defender repair/rebuild during PREPARING/ACTIVE.
         if (manager.anyWarForCity(city.id) != null) {
             event.setCanceled(true);
+            return;
+        }
+
+        // Outside a siege, newly added blocks are fortifications and consume the
+        // city's budget. Original snapshotted infrastructure never consumes it.
+        if (!manager.registerCityFortification(level, event.getPos())) {
+            event.setCanceled(true);
+            if (event.getEntity() instanceof ServerPlayer player) {
+                player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                        "Strategic city fortification budget reached: "
+                                + manager.fortificationCount(city) + "/"
+                                + manager.fortificationBudget(city) + " blocks."));
+            }
         }
     }
 
@@ -119,10 +167,38 @@ public final class CityProtectionEvents {
 
         WarManager manager = WarManager.get(level.getServer());
 
-        // Permanent city infrastructure never becomes destructible. Player-built
-        // fortifications are intentionally left in the explosion list so siege weapons
-        // can remove them during an ACTIVE city battle.
-        event.getAffectedBlocks().removeIf(pos ->
-                manager.isProtectedCityBlock(level.dimension().location(), pos));
+        event.getAffectedBlocks().removeIf(pos -> {
+            StrategicCity city = manager.cityAtBlock(level.dimension().location(), pos);
+            if (city == null) return false;
+
+            // Original city infrastructure is always permanent.
+            if (city.isProtected(pos)) return true;
+
+            WarRecord war = manager.anyWarForCity(city.id);
+
+            // PREPARING is a frozen snapshot: TNT, creepers and other explosion
+            // sources cannot alter the fortifications before the fight goes live.
+            // During ACTIVE, non-permanent fortifications are destructible.
+            return war != null && war.phase != WarPhase.ACTIVE;
+        });
+    }
+
+    @SubscribeEvent
+    public static void onPiston(PistonEvent.Pre event) {
+        if (!(event.getLevel() instanceof ServerLevel level)) return;
+
+        WarManager manager = WarManager.get(level.getServer());
+
+        // Prevent a piston outside the boundary from being used to mutate the
+        // frozen battlefield. Scan the piston line plus vanilla's 12-block push
+        // limit; this also covers ordinary sticky-piston pulls.
+        for (int i = 0; i <= 13; i++) {
+            BlockPos check = event.getPos().relative(event.getDirection(), i);
+            StrategicCity city = manager.cityAtBlock(level.dimension().location(), check);
+            if (city != null && manager.anyWarForCity(city.id) != null) {
+                event.setCanceled(true);
+                return;
+            }
+        }
     }
 }
