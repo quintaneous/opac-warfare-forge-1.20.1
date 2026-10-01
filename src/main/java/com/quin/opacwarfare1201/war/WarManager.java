@@ -162,7 +162,39 @@ public final class WarManager {
     public void releaseCityFortification(ServerLevel level, BlockPos pos) {
         StrategicCity city = cityAtBlock(level.dimension().location(), pos);
         if (city == null) return;
-        if (city.fortificationBlocks.remove(pos.asLong())) data.changed();
+
+        boolean changed = city.fortificationBlocks.remove(pos.asLong());
+        WarRecord war = activeWarForCity(city.id);
+        if (war != null && war.siegePlacements.remove(pos.asLong()) != null) changed = true;
+        if (changed) data.changed();
+    }
+
+    public void recordSiegePlacement(WarRecord war, BlockPos pos, UUID playerId) {
+        war.siegePlacements.put(pos.asLong(), playerId);
+        data.changed();
+    }
+
+    public boolean canDefenderRepositionSiegePlacement(WarRecord war, BlockPos pos, UUID playerId) {
+        return playerId.equals(war.siegePlacements.get(pos.asLong()))
+                && war.isDefender(playerId)
+                && isParticipant(war, playerId, true);
+    }
+
+    public boolean isInsideCityCaptureNoBuildCore(StrategicCity city, BlockPos pos) {
+        int radius = WarConfig.CITY_CAPTURE_NO_BUILD_RADIUS.get();
+        if (radius <= 0) return false;
+        int centerX = (city.captureChunkX << 4) + 8;
+        int centerZ = (city.captureChunkZ << 4) + 8;
+        return Math.abs(pos.getX() - centerX) <= radius
+                && Math.abs(pos.getZ() - centerZ) <= radius;
+    }
+
+    @Nullable
+    public WarRecord activeWarForRosterPlayer(UUID playerId) {
+        for (WarRecord war : data.wars()) {
+            if (war.phase == WarPhase.ACTIVE && war.isParticipant(playerId)) return war;
+        }
+        return null;
     }
 
     private void ensureFortificationTracking(ServerLevel level, StrategicCity city) {
