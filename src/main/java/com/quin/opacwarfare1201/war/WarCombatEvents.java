@@ -15,7 +15,8 @@ public final class WarCombatEvents {
         if (!WarConfig.ISOLATE_WAR_COMBAT.get()) return;
         if (!(event.getEntity() instanceof ServerPlayer victim)) return;
 
-        WarManager manager = WarManager.get(victim.server);
+        if (victim.getServer() == null) return;
+        WarManager manager = WarManager.get(victim.getServer());
         ChunkPos chunk = victim.chunkPosition();
         WarRecord war = manager.activeWarAt(
                 victim.level().dimension().location(), chunk.x, chunk.z);
