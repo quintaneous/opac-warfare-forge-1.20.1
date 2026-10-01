@@ -1290,6 +1290,9 @@ public final class WarManager {
     }
 
     private void activate(WarRecord war) {
+        ServerLevel level = level(war.dimension);
+        if (level == null) return;
+
         if (war.isCityWar()) {
             StrategicCity city = data.getCity(war.cityId);
             if (city == null
@@ -1376,6 +1379,12 @@ public final class WarManager {
         int sub = attackerWon ? 0 : war.originalSubConfig;
         boolean forceload = attackerWon ? false : war.originalForceload;
         claims.claim(war.dimension, newOwner, sub, war.chunkX, war.chunkZ, forceload);
+
+        if (attackerWon) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.attackerPartyId);
+        } else if (war.defenderPartyId != null) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId);
+        }
 
         boolean capturedCapital = attackerWon
                 && war.defenderPartyId != null
