@@ -255,10 +255,11 @@ public final class CityProtectionEvents {
 
         WarRecord playerWar = manager.activeWarForRosterPlayer(player.getUUID());
         if (playerWar != null && !manager.isParticipant(playerWar, player.getUUID(), true)) {
-            if (isCreateOrCbcBlock(level.getBlockState(event.getPos()))) {
-                event.setCanceled(true);
-                return;
-            }
+            // Zero-life players are out of the battle. Block all block
+            // interactions so levers/buttons cannot be used to fire remote
+            // artillery after elimination.
+            event.setCanceled(true);
+            return;
         }
 
         if (!WarConfig.BLOCK_FLUIDS_DURING_CITY_SIEGE.get()) return;
