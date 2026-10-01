@@ -532,6 +532,28 @@ public final class WarManager {
         return secs + "s";
     }
 
+    public long remainingBattleSeconds(WarRecord war) {
+        if (war.phase != WarPhase.ACTIVE || war.activeEndsAtGameTime <= 0L) return -1L;
+        ServerLevel level = level(war.dimension);
+        if (level == null) return -1L;
+        return Math.max(0L, (war.activeEndsAtGameTime - level.getGameTime() + 19L) / 20L);
+    }
+
+    public long remainingPreparationSeconds(WarRecord war) {
+        if (war.phase != WarPhase.PREPARING) return -1L;
+        ServerLevel level = level(war.dimension);
+        if (level == null) return -1L;
+        long deadline = war.onlineGraceDeadlineGameTime > 0L
+                ? war.onlineGraceDeadlineGameTime
+                : war.activateAtGameTime;
+        return Math.max(0L, (deadline - level.getGameTime() + 19L) / 20L);
+    }
+
+    private UUID currentPartyOwnerOr(UUID partyId, UUID fallback) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        return party == null ? fallback : party.getOwner().getUUID();
+    }
+
     public StartResult startWar(ServerPlayer attacker, ChunkPos target) {
         ResourceLocation dim = attacker.level().dimension().location();
         if (anyWarAt(dim, target.x, target.z) != null) {
@@ -1438,7 +1460,7 @@ public final class WarManager {
             if (attackerWon) {
                 String previous = cityControllerName(city);
                 city.controllerPartyId = war.attackerPartyId;
-                city.controllerOwnerId = war.attackerOwnerId;
+                city.controllerOwnerId = currentPartyOwnerOr(war.attackerPartyId, war.attackerOwnerId);
                 data.remove(war.id);
                 data.changed();
                 broadcast(Component.literal("CITY CAPTURED: " + attackerName(war) + " took " + city.id
@@ -1454,7 +1476,9 @@ public final class WarManager {
         }
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        UUID newOwner = attackerWon ? war.attackerOwnerId : war.originalClaimOwner;
+        UUID newOwner = attackerWon
+                ? currentPartyOwnerOr(war.attackerPartyId, war.attackerOwnerId)
+                : war.originalClaimOwner;
         if (newOwner == null) {
             data.remove(war.id);
             return;
