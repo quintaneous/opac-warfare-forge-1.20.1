@@ -217,6 +217,8 @@ public final class WarManager {
     }
 
     public void onServerStarted() {
+        initializeTerritoryRegistry();
+        migratePersistedWars();
         reconcilePartyState();
         boolean changed = false;
         for (WarRecord war : data.wars()) {
@@ -243,6 +245,93 @@ public final class WarManager {
 
         OpacWarfare1201.LOGGER.info("Loaded {} persisted war(s), {} capital(s), and {} strategic city/cities",
                 data.wars().size(), data.capitals().size(), data.cities().size());
+    }
+
+    private void initializeTerritoryRegistry() {
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+
+        if (!data.territoryRegistryInitialized()) {
+            List<ClaimLocation> orphaned = new ArrayList<>();
+
+            claims.getPlayerInfoStream().forEach(info -> {
+                UUID playerId = info.getPlayerId();
+                if (SpecialClaimOwners.SERVER.equals(playerId)) return;
+
+                IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
+                info.getStream().forEach(entry -> {
+                    ResourceLocation dim = entry.getKey();
+                    entry.getValue().getStream().forEach(list ->
+                            list.getStream().forEach(cp -> {
+                                if (party == null) {
+                                    orphaned.add(new ClaimLocation(dim, cp.x, cp.z));
+                                } else {
+                                    data.setTerritoryParty(new TerritoryKey(dim, cp.x, cp.z), party.getId());
+                                }
+                            }));
+                });
+            });
+
+            for (ClaimLocation location : orphaned) {
+                claims.unclaim(location.dimension, location.x, location.z);
+            }
+
+            data.markTerritoryRegistryInitialized();
+            OpacWarfare1201.LOGGER.info(
+                    "Initialized nation territory registry with {} chunk(s); removed {} legacy partyless claim(s)",
+                    data.territoryOwners().size(), orphaned.size());
+        }
+
+        // Remove registry rows whose OPaC claim has vanished. An ACTIVE normal
+        // war temporarily uses SERVER ownership, so its registry row remains.
+        for (TerritoryKey key : new ArrayList<>(data.territoryOwners().keySet())) {
+            IPlayerChunkClaimAPI claim = claims.get(key.dimension(), key.chunkX(), key.chunkZ());
+            if (claim == null) {
+                data.removeTerritory(key);
+                continue;
+            }
+            if (SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) {
+                WarRecord war = anyWarAt(key.dimension(), key.chunkX(), key.chunkZ());
+                if (war == null || war.isCityWar()) data.removeTerritory(key);
+            }
+        }
+    }
+
+    private void migratePersistedWars() {
+        boolean changed = false;
+        for (WarRecord war : data.wars()) {
+            if (war.attackerRoster.isEmpty()) {
+                war.attackerRoster.addAll(snapshotPartyMembers(war.attackerPartyId));
+                if (war.attackerRoster.isEmpty() && war.attackerOwnerId != null) {
+                    war.attackerRoster.add(war.attackerOwnerId);
+                }
+                changed = true;
+            }
+            if (war.defenderPartyId != null && war.defenderRoster.isEmpty()) {
+                war.defenderRoster.addAll(snapshotPartyMembers(war.defenderPartyId));
+                if (war.defenderRoster.isEmpty() && war.defenderOwnerId != null) {
+                    war.defenderRoster.add(war.defenderOwnerId);
+                }
+                changed = true;
+            }
+
+            if (war.phase == WarPhase.ACTIVE && war.activeEndsAtGameTime <= 0L) {
+                ServerLevel level = level(war.dimension);
+                if (level != null && WarConfig.ACTIVE_WAR_MAX_MINUTES.get() > 0) {
+                    war.activeEndsAtGameTime = level.getGameTime()
+                            + WarConfig.ACTIVE_WAR_MAX_MINUTES.get() * 60L * 20L;
+                    changed = true;
+                }
+            }
+        }
+        if (changed) data.changed();
+    }
+
+    private Set<UUID> snapshotPartyMembers(@Nullable UUID partyId) {
+        Set<UUID> members = new LinkedHashSet<>();
+        if (partyId == null) return members;
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party != null) party.getMemberInfoStream().forEach(member -> members.add(member.getUUID()));
+        return members;
     }
 
     @Nullable
