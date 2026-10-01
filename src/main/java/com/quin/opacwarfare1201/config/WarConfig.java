@@ -16,6 +16,7 @@ public final class WarConfig {
     public static final ForgeConfigSpec.BooleanValue CBC_PROTECT_CLAIMED_TERRAIN;
     public static final ForgeConfigSpec.BooleanValue ONLY_ONE_OFFENSIVE_WAR_PER_SIDE;
     public static final ForgeConfigSpec.IntValue EMPTY_DECAY_SECONDS;
+    public static final ForgeConfigSpec.IntValue CITY_FORTIFICATION_BUDGET_3X3;
 
     static {
         ForgeConfigSpec.Builder b = new ForgeConfigSpec.Builder();
@@ -39,6 +40,10 @@ public final class WarConfig {
                 .define("oneOffensiveWarPerSide", true);
         EMPTY_DECAY_SECONDS = b.comment("Seconds with nobody in the capture zone for progress to decay from an extreme back to 50%.")
                 .defineInRange("emptyDecaySeconds", 180, 10, 7200);
+        CITY_FORTIFICATION_BUDGET_3X3 = b.comment(
+                        "Fortification block budget for a 3x3-chunk strategic city. Other city sizes scale linearly by chunk count.",
+                        "Only blocks added after city creation count; the original city snapshot remains permanent infrastructure.")
+                .defineInRange("cityFortificationBudget3x3", 5000, 0, 100000);
         b.pop();
 
         b.push("territory");
