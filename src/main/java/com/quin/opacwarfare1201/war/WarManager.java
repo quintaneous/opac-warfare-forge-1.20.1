@@ -2,6 +2,7 @@ package com.quin.opacwarfare1201.war;
 
 import com.quin.opacwarfare1201.OpacWarfare1201;
 import com.quin.opacwarfare1201.config.WarConfig;
+import com.quin.opacwarfare1201.data.TerritoryKey;
 import com.quin.opacwarfare1201.data.WarSavedData;
 import com.quin.opacwarfare1201.opac.OpacSides;
 import net.minecraft.ChatFormatting;
@@ -161,7 +162,43 @@ public final class WarManager {
     public void releaseCityFortification(ServerLevel level, BlockPos pos) {
         StrategicCity city = cityAtBlock(level.dimension().location(), pos);
         if (city == null) return;
-        if (city.fortificationBlocks.remove(pos.asLong())) data.changed();
+
+        boolean changed = city.fortificationBlocks.remove(pos.asLong());
+        WarRecord war = activeWarForCity(city.id);
+        if (war != null && war.siegePlacements.remove(pos.asLong()) != null) changed = true;
+        if (changed) data.changed();
+    }
+
+    public void recordSiegePlacement(WarRecord war, BlockPos pos, UUID playerId) {
+        war.siegePlacements.put(pos.asLong(), playerId);
+        data.changed();
+    }
+
+    public boolean canDefenderRepositionSiegePlacement(WarRecord war, BlockPos pos, UUID playerId) {
+        return playerId.equals(war.siegePlacements.get(pos.asLong()))
+                && war.isDefender(playerId)
+                && isParticipant(war, playerId, true);
+    }
+
+    public boolean isCurrentSiegePlacement(WarRecord war, BlockPos pos) {
+        return war.siegePlacements.containsKey(pos.asLong());
+    }
+
+    public boolean isInsideCityCaptureNoBuildCore(StrategicCity city, BlockPos pos) {
+        int radius = WarConfig.CITY_CAPTURE_NO_BUILD_RADIUS.get();
+        if (radius <= 0) return false;
+        int centerX = (city.captureChunkX << 4) + 8;
+        int centerZ = (city.captureChunkZ << 4) + 8;
+        return Math.abs(pos.getX() - centerX) <= radius
+                && Math.abs(pos.getZ() - centerZ) <= radius;
+    }
+
+    @Nullable
+    public WarRecord activeWarForRosterPlayer(UUID playerId) {
+        for (WarRecord war : data.wars()) {
+            if (war.phase == WarPhase.ACTIVE && war.isParticipant(playerId)) return war;
+        }
+        return null;
     }
 
     private void ensureFortificationTracking(ServerLevel level, StrategicCity city) {
@@ -216,6 +253,8 @@ public final class WarManager {
     }
 
     public void onServerStarted() {
+        initializeTerritoryRegistry();
+        migratePersistedWars();
         reconcilePartyState();
         boolean changed = false;
         for (WarRecord war : data.wars()) {
@@ -242,6 +281,93 @@ public final class WarManager {
 
         OpacWarfare1201.LOGGER.info("Loaded {} persisted war(s), {} capital(s), and {} strategic city/cities",
                 data.wars().size(), data.capitals().size(), data.cities().size());
+    }
+
+    private void initializeTerritoryRegistry() {
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+
+        if (!data.territoryRegistryInitialized()) {
+            List<ClaimLocation> orphaned = new ArrayList<>();
+
+            claims.getPlayerInfoStream().forEach(info -> {
+                UUID playerId = info.getPlayerId();
+                if (SpecialClaimOwners.SERVER.equals(playerId)) return;
+
+                IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
+                info.getStream().forEach(entry -> {
+                    ResourceLocation dim = entry.getKey();
+                    entry.getValue().getStream().forEach(list ->
+                            list.getStream().forEach(cp -> {
+                                if (party == null) {
+                                    orphaned.add(new ClaimLocation(dim, cp.x, cp.z));
+                                } else {
+                                    data.setTerritoryParty(new TerritoryKey(dim, cp.x, cp.z), party.getId());
+                                }
+                            }));
+                });
+            });
+
+            for (ClaimLocation location : orphaned) {
+                claims.unclaim(location.dimension, location.x, location.z);
+            }
+
+            data.markTerritoryRegistryInitialized();
+            OpacWarfare1201.LOGGER.info(
+                    "Initialized nation territory registry with {} chunk(s); removed {} legacy partyless claim(s)",
+                    data.territoryOwners().size(), orphaned.size());
+        }
+
+        // Remove registry rows whose OPaC claim has vanished. An ACTIVE normal
+        // war temporarily uses SERVER ownership, so its registry row remains.
+        for (TerritoryKey key : new ArrayList<>(data.territoryOwners().keySet())) {
+            IPlayerChunkClaimAPI claim = claims.get(key.dimension(), key.chunkX(), key.chunkZ());
+            if (claim == null) {
+                data.removeTerritory(key);
+                continue;
+            }
+            if (SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) {
+                WarRecord war = anyWarAt(key.dimension(), key.chunkX(), key.chunkZ());
+                if (war == null || war.isCityWar()) data.removeTerritory(key);
+            }
+        }
+    }
+
+    private void migratePersistedWars() {
+        boolean changed = false;
+        for (WarRecord war : data.wars()) {
+            if (war.attackerRoster.isEmpty()) {
+                war.attackerRoster.addAll(snapshotPartyMembers(war.attackerPartyId));
+                if (war.attackerRoster.isEmpty() && war.attackerOwnerId != null) {
+                    war.attackerRoster.add(war.attackerOwnerId);
+                }
+                changed = true;
+            }
+            if (war.defenderPartyId != null && war.defenderRoster.isEmpty()) {
+                war.defenderRoster.addAll(snapshotPartyMembers(war.defenderPartyId));
+                if (war.defenderRoster.isEmpty() && war.defenderOwnerId != null) {
+                    war.defenderRoster.add(war.defenderOwnerId);
+                }
+                changed = true;
+            }
+
+            if (war.phase == WarPhase.ACTIVE && war.activeEndsAtGameTime <= 0L) {
+                ServerLevel level = level(war.dimension);
+                if (level != null && WarConfig.ACTIVE_WAR_MAX_MINUTES.get() > 0) {
+                    war.activeEndsAtGameTime = level.getGameTime()
+                            + WarConfig.ACTIVE_WAR_MAX_MINUTES.get() * 60L * 20L;
+                    changed = true;
+                }
+            }
+        }
+        if (changed) data.changed();
+    }
+
+    private Set<UUID> snapshotPartyMembers(@Nullable UUID partyId) {
+        Set<UUID> members = new LinkedHashSet<>();
+        if (partyId == null) return members;
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party != null) party.getMemberInfoStream().forEach(member -> members.add(member.getUUID()));
+        return members;
     }
 
     @Nullable
@@ -286,15 +412,47 @@ public final class WarManager {
     }
 
     public boolean isParticipant(WarRecord war, UUID playerId, boolean requireLives) {
-        boolean member = OpacSides.isMember(server, playerId, war.attackerPartyId, war.attackerOwnerId)
-                || OpacSides.isMember(server, playerId, war.defenderPartyId, war.defenderOwnerId);
-        if (!member) return false;
+        if (!war.isParticipant(playerId)) return false;
         if (!requireLives || WarConfig.WAR_LIVES.get() <= 0) return true;
         return war.lives.getOrDefault(playerId, WarConfig.WAR_LIVES.get()) > 0;
     }
 
     public boolean isAttacker(WarRecord war, UUID playerId) {
-        return OpacSides.isMember(server, playerId, war.attackerPartyId, war.attackerOwnerId);
+        return war.isAttacker(playerId);
+    }
+
+    public boolean isDefender(WarRecord war, UUID playerId) {
+        return war.isDefender(playerId);
+    }
+
+    public boolean isCurrentPartyMember(UUID playerId, UUID partyId) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
+        return party != null && party.getId().equals(partyId);
+    }
+
+    @Nullable
+    public UUID territoryPartyAt(ResourceLocation dim, int x, int z) {
+        return data.territoryParty(new TerritoryKey(dim, x, z));
+    }
+
+    public boolean territoryBelongsTo(ResourceLocation dim, int x, int z, UUID partyId) {
+        return partyId.equals(territoryPartyAt(dim, x, z));
+    }
+
+    public void setTerritoryParty(ResourceLocation dim, int x, int z, UUID partyId) {
+        data.setTerritoryParty(new TerritoryKey(dim, x, z), partyId);
+    }
+
+    public void clearTerritory(ResourceLocation dim, int x, int z) {
+        data.removeTerritory(new TerritoryKey(dim, x, z));
+    }
+
+    @Nullable
+    public UUID battlefieldPartyAt(ResourceLocation dim, int x, int z) {
+        UUID territory = territoryPartyAt(dim, x, z);
+        if (territory != null) return territory;
+        StrategicCity city = cityAtChunk(dim, x, z);
+        return city == null ? null : city.controllerPartyId;
     }
 
     public String attackerName(WarRecord war) {
@@ -316,19 +474,11 @@ public final class WarManager {
     }
 
     public int claimCountForParty(UUID partyId) {
-        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
-        if (party == null) return 0;
-
-        Set<UUID> members = new HashSet<>();
-        party.getMemberInfoStream().forEach(member -> members.add(member.getUUID()));
-
-        int[] count = {0};
-        OpenPACServerAPI.get(server).getServerClaimsManager().getPlayerInfoStream().forEach(info -> {
-            if (!members.contains(info.getPlayerId())) return;
-            info.getStream().forEach(entry ->
-                    entry.getValue().getStream().forEach(list -> count[0] += list.getCount()));
-        });
-        return count[0];
+        int count = 0;
+        for (UUID owner : data.territoryOwners().values()) {
+            if (partyId.equals(owner)) count++;
+        }
+        return count;
     }
 
     public long remainingAttackCooldownSeconds(UUID partyId) {
@@ -361,10 +511,10 @@ public final class WarManager {
         long until = System.currentTimeMillis() + minutes * 60_000L;
         data.setAttackCooldownUntil(war.attackerPartyId, until);
 
-        IServerPartyAPI attackingParty = OpenPACServerAPI.get(server).getPartyManager().getPartyById(war.attackerPartyId);
-        if (attackingParty != null) {
-            attackingParty.getMemberInfoStream()
-                    .forEach(member -> data.setPlayerAttackCooldownUntil(member.getUUID(), until));
+        if (!war.attackerRoster.isEmpty()) {
+            for (UUID memberId : war.attackerRoster) {
+                data.setPlayerAttackCooldownUntil(memberId, until);
+            }
         } else if (war.attackerOwnerId != null) {
             data.setPlayerAttackCooldownUntil(war.attackerOwnerId, until);
         }
@@ -384,6 +534,28 @@ public final class WarManager {
         if (hours > 0L) return hours + "h " + minutes + "m";
         if (minutes > 0L) return minutes + "m " + secs + "s";
         return secs + "s";
+    }
+
+    public long remainingBattleSeconds(WarRecord war) {
+        if (war.phase != WarPhase.ACTIVE || war.activeEndsAtGameTime <= 0L) return -1L;
+        ServerLevel level = level(war.dimension);
+        if (level == null) return -1L;
+        return Math.max(0L, (war.activeEndsAtGameTime - level.getGameTime() + 19L) / 20L);
+    }
+
+    public long remainingPreparationSeconds(WarRecord war) {
+        if (war.phase != WarPhase.PREPARING) return -1L;
+        ServerLevel level = level(war.dimension);
+        if (level == null) return -1L;
+        long deadline = war.onlineGraceDeadlineGameTime > 0L
+                ? war.onlineGraceDeadlineGameTime
+                : war.activateAtGameTime;
+        return Math.max(0L, (deadline - level.getGameTime() + 19L) / 20L);
+    }
+
+    private UUID currentPartyOwnerOr(UUID partyId, UUID fallback) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        return party == null ? fallback : party.getOwner().getUUID();
     }
 
     public StartResult startWar(ServerPlayer attacker, ChunkPos target) {
@@ -408,13 +580,23 @@ public final class WarManager {
             return StartResult.fail("You must be in an Open Parties and Claims party to start a war.");
         }
 
-        OpacSides.Side defenderSide = OpacSides.claimSide(server, targetClaim);
-        if (OpacSides.sameSide(attackerSide, defenderSide)) {
+        UUID defenderPartyId = territoryPartyAt(dim, target.x, target.z);
+        if (defenderPartyId == null) {
+            return StartResult.fail("That claim is not registered to a nation. An admin should reconcile legacy territory before it can be attacked.");
+        }
+        OpacSides.Side defenderSide = sideForParty(defenderPartyId);
+        if (defenderSide == null) {
+            return StartResult.fail("The target nation's OPaC party no longer exists.");
+        }
+        if (attackerSide.partyId().equals(defenderPartyId)) {
             return StartResult.fail("You cannot attack your own party's claim.");
         }
 
         String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
+
+        String defenseFailure = validateDefenderCapacity(defenderPartyId);
+        if (defenseFailure != null) return StartResult.fail(defenseFailure);
 
         if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
                 && !OpacSides.isOnline(server, defenderSide.partyId(), defenderSide.ownerId())) {
@@ -446,6 +628,7 @@ public final class WarManager {
         war.originalSubConfig = targetClaim.getSubConfigIndex();
         war.originalForceload = targetClaim.isForceloadable();
         war.phase = WarPhase.PREPARING;
+        initializeWarRosters(war);
 
         ServerLevel level = level(dim);
         long now = level == null ? server.overworld().getGameTime() : level.getGameTime();
@@ -482,10 +665,14 @@ public final class WarManager {
         String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
 
-        if (city.controllerPartyId != null
-                && WarConfig.REQUIRE_ONLINE_DEFENDER.get()
-                && !OpacSides.isOnline(server, city.controllerPartyId, city.controllerOwnerId)) {
-            return StartResult.fail("At least one player from the city controller must be online.");
+        if (city.controllerPartyId != null) {
+            String defenseFailure = validateDefenderCapacity(city.controllerPartyId);
+            if (defenseFailure != null) return StartResult.fail(defenseFailure);
+
+            if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
+                    && !OpacSides.isOnline(server, city.controllerPartyId, city.controllerOwnerId)) {
+                return StartResult.fail("At least one player from the city controller must be online.");
+            }
         }
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
@@ -504,6 +691,7 @@ public final class WarManager {
         war.defenderOwnerId = city.controllerOwnerId;
         war.cityId = city.id;
         war.phase = WarPhase.PREPARING;
+        initializeWarRosters(war);
         setCityWarCapturePoint(war, city);
 
         ServerLevel level = level(city.dimension);
@@ -521,6 +709,50 @@ public final class WarManager {
                 + " | fortifications " + fortificationCount(city) + "/" + fortificationBudget(city) + ".")
                 .withStyle(ChatFormatting.LIGHT_PURPLE, ChatFormatting.BOLD));
         return StartResult.ok(war);
+    }
+
+    @Nullable
+    private OpacSides.Side sideForParty(UUID partyId) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party == null) return null;
+        return new OpacSides.Side(party.getId(), party.getOwner().getUUID(), party.getDefaultName());
+    }
+
+    private void initializeWarRosters(WarRecord war) {
+        war.attackerRoster.clear();
+        war.attackerRoster.addAll(snapshotPartyMembers(war.attackerPartyId));
+        if (war.attackerRoster.isEmpty() && war.attackerOwnerId != null) {
+            war.attackerRoster.add(war.attackerOwnerId);
+        }
+
+        war.defenderRoster.clear();
+        if (war.defenderPartyId != null) {
+            war.defenderRoster.addAll(snapshotPartyMembers(war.defenderPartyId));
+            if (war.defenderRoster.isEmpty() && war.defenderOwnerId != null) {
+                war.defenderRoster.add(war.defenderOwnerId);
+            }
+        }
+
+        if (WarConfig.WAR_LIVES.get() > 0) {
+            for (UUID playerId : war.attackerRoster) war.lives.put(playerId, WarConfig.WAR_LIVES.get());
+            for (UUID playerId : war.defenderRoster) war.lives.put(playerId, WarConfig.WAR_LIVES.get());
+        }
+    }
+
+    @Nullable
+    private String validateDefenderCapacity(UUID defenderPartyId) {
+        int max = WarConfig.MAX_CONCURRENT_DEFENSIVE_WARS.get();
+        if (max <= 0) return null;
+
+        int count = 0;
+        for (WarRecord war : data.wars()) {
+            if (defenderPartyId.equals(war.defenderPartyId)) count++;
+        }
+        if (count >= max) {
+            return "That nation is already defending " + count
+                    + " war(s), which is the configured defensive-war limit.";
+        }
+        return null;
     }
 
     @Nullable
@@ -559,10 +791,10 @@ public final class WarManager {
     }
 
     private boolean neighborAccessible(IServerClaimsManagerAPI claims, ResourceLocation dim, int x, int z, OpacSides.Side attacker) {
-        IPlayerChunkClaimAPI c = claims.get(dim, x, z);
-        if (c == null) return true;
-        if (SpecialClaimOwners.SERVER.equals(c.getPlayerId())) return false;
-        return OpacSides.sameSide(attacker, OpacSides.claimSide(server, c));
+        IPlayerChunkClaimAPI claim = claims.get(dim, x, z);
+        if (claim == null) return true;
+        if (SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) return false;
+        return attacker.partyId() != null && attacker.partyId().equals(territoryPartyAt(dim, x, z));
     }
 
     private void setCapturePoint(WarRecord war, ServerLevel level) {
@@ -592,7 +824,7 @@ public final class WarManager {
                 continue;
             }
             if (isAttacker(war, p.getUUID())) attackers++;
-            else if (OpacSides.isMember(server, p.getUUID(), war.defenderPartyId, war.defenderOwnerId)) defenders++;
+            else if (isDefender(war, p.getUUID())) defenders++;
         }
         return new CaptureCounts(attackers, defenders);
     }
@@ -631,8 +863,8 @@ public final class WarManager {
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         IPlayerChunkClaimAPI claim = claims.get(dim, cp.x, cp.z);
         if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())
-                || !OpacSides.sameSide(side, OpacSides.claimSide(server, claim))) {
-            return CapitalResult.fail("Stand inside a chunk owned by your party to establish the capital.");
+                || !territoryBelongsTo(dim, cp.x, cp.z, side.partyId())) {
+            return CapitalResult.fail("Stand inside nation territory registered to your party to establish the capital.");
         }
 
         CapitalRecord capital = new CapitalRecord(side.partyId());
@@ -641,6 +873,7 @@ public final class WarManager {
         capital.chunkX = cp.x;
         capital.chunkZ = cp.z;
         data.putCapital(capital);
+        rememberPartySnapshot(side.partyId());
 
         broadcast(Component.literal("CAPITAL: " + side.name() + " established its capital at chunk ["
                 + cp.x + ", " + cp.z + "].").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD));
@@ -781,10 +1014,58 @@ public final class WarManager {
 
         city.controllerPartyId = party.getId();
         city.controllerOwnerId = party.getOwner().getUUID();
+        rememberPartySnapshot(party.getId());
         data.changed();
         broadcast(Component.literal("CITY CONTROL: " + city.id + " is now controlled by " + party.getDefaultName() + ".")
                 .withStyle(ChatFormatting.LIGHT_PURPLE));
         return CityResult.ok(city, city.protectedBlocks.size());
+    }
+
+    public CityResult setCityProtectionAround(ServerPlayer admin, String cityId, int radiusBlocks, boolean permanent) {
+        StrategicCity city = data.getCity(cityId);
+        if (city == null) return CityResult.fail("Unknown strategic city: " + cityId + ".");
+        if (anyWarForCity(city.id) != null) {
+            return CityResult.fail("City protection cannot be edited during a siege.");
+        }
+        if (!admin.level().dimension().location().equals(city.dimension)) {
+            return CityResult.fail("You must be in the same dimension as the strategic city.");
+        }
+        if (radiusBlocks < 1 || radiusBlocks > 64) {
+            return CityResult.fail("Protection edit radius must be 1-64 blocks.");
+        }
+
+        ServerLevel level = level(city.dimension);
+        if (level == null) return CityResult.fail("Could not access city dimension.");
+
+        BlockPos center = admin.blockPosition();
+        int changed = 0;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+
+        for (int x = center.getX() - radiusBlocks; x <= center.getX() + radiusBlocks; x++) {
+            for (int y = Math.max(level.getMinBuildHeight(), center.getY() - radiusBlocks);
+                 y <= Math.min(level.getMaxBuildHeight() - 1, center.getY() + radiusBlocks); y++) {
+                for (int z = center.getZ() - radiusBlocks; z <= center.getZ() + radiusBlocks; z++) {
+                    pos.set(x, y, z);
+                    if (!city.containsBlock(city.dimension, pos)) continue;
+
+                    if (permanent) {
+                        BlockState state = level.getBlockState(pos);
+                        if (!state.isAir() && state.getFluidState().isEmpty() && city.protectedBlocks.add(pos)) {
+                            city.fortificationBlocks.remove(pos.asLong());
+                            changed++;
+                        }
+                    } else if (city.protectedBlocks.remove(pos)) {
+                        changed++;
+                    }
+                }
+            }
+        }
+
+        if (changed > 0) data.changed();
+        return new CityResult(true,
+                (permanent ? "Marked " : "Made breachable ") + changed + " city block(s).",
+                city,
+                city.protectedBlocks.size());
     }
 
     @Nullable
@@ -796,11 +1077,28 @@ public final class WarManager {
         }
         rememberPartySnapshot(side.partyId());
 
+        WarRecord frozenWar = anyWarAt(dim, x, z);
+        if (frozenWar != null && !frozenWar.isCityWar()) {
+            return "That claim is frozen while its war is PREPARING or ACTIVE.";
+        }
+
+        IPlayerChunkClaimAPI current = claims.get(dim, x, z);
+        UUID registeredParty = territoryPartyAt(dim, x, z);
+
+        if (action != ClaimingAction.CLAIM && current != null
+                && !SpecialClaimOwners.SERVER.equals(current.getPlayerId())) {
+            if (registeredParty == null) {
+                return "That claim has no nation ownership record. Ask an admin to reconcile territory before modifying it.";
+            }
+            if (!side.partyId().equals(registeredParty)) {
+                return "That chunk belongs to another nation. Leaving or changing parties does not transfer existing territory.";
+            }
+        }
+
         if (action == ClaimingAction.CLAIM && WarConfig.REQUIRE_CONTIGUOUS_CLAIMS.get()) {
-            IPlayerChunkClaimAPI current = claims.get(dim, x, z);
             if (current != null) return null;
 
-            boolean anyClaims = sideHasAnyClaimInDimension(claims, side, dim);
+            boolean anyClaims = sideHasAnyClaimInDimension(side, dim);
             boolean hasAnchor = hasValidAnchorInDimension(side, dim);
 
             if (!anyClaims && !hasAnchor) return null;
@@ -814,13 +1112,8 @@ public final class WarManager {
             return "New claims must touch territory connected to your capital or a controlled strategic city on a north/south/east/west side.";
         }
 
-        if (action == ClaimingAction.UNCLAIM) {
-            IPlayerChunkClaimAPI current = claims.get(dim, x, z);
-            if (current == null || SpecialClaimOwners.SERVER.equals(current.getPlayerId())
-                    || !OpacSides.sameSide(side, OpacSides.claimSide(server, current))) {
-                return null;
-            }
-
+        if (action == ClaimingAction.UNCLAIM && registeredParty != null
+                && side.partyId().equals(registeredParty)) {
             CapitalRecord capital = data.getCapital(side.partyId());
             if (capital != null && capital.targets(dim, x, z)) {
                 return "Your capital chunk cannot be unclaimed. An admin must clear or relocate the capital first.";
@@ -835,6 +1128,19 @@ public final class WarManager {
         return null;
     }
 
+    public void handleSuccessfulClaimAction(UUID playerId, ResourceLocation dim, int x, int z,
+                                            ClaimingAction action) {
+        if (action == ClaimingAction.CLAIM) {
+            OpacSides.Side side = OpacSides.playerSide(server, playerId);
+            if (side != null && side.partyId() != null) {
+                setTerritoryParty(dim, x, z, side.partyId());
+                rememberPartySnapshot(side.partyId());
+            }
+        } else if (action == ClaimingAction.UNCLAIM) {
+            clearTerritory(dim, x, z);
+        }
+    }
+
     private boolean hasValidAnchorInDimension(OpacSides.Side side, ResourceLocation dim) {
         CapitalRecord capital = side.partyId() == null ? null : data.getCapital(side.partyId());
         if (capital != null && capital.dimension.equals(dim)) return true;
@@ -844,20 +1150,20 @@ public final class WarManager {
         return false;
     }
 
-    private boolean sideHasAnyClaimInDimension(IServerClaimsManagerAPI claims, OpacSides.Side side, ResourceLocation dim) {
-        return claims.getPlayerInfoStream().anyMatch(info -> {
-            if (!OpacSides.isMember(server, info.getPlayerId(), side.partyId(), side.ownerId())) return false;
-            var dimensionClaims = info.getDimension(dim);
-            if (dimensionClaims == null) return false;
-            return dimensionClaims.getStream().anyMatch(list -> list.getCount() > 0);
-        });
+    private boolean sideHasAnyClaimInDimension(OpacSides.Side side, ResourceLocation dim) {
+        if (side.partyId() == null) return false;
+        for (Map.Entry<TerritoryKey, UUID> entry : data.territoryOwners().entrySet()) {
+            if (entry.getKey().dimension().equals(dim) && side.partyId().equals(entry.getValue())) return true;
+        }
+        return false;
     }
 
     private boolean isFriendlyClaim(IServerClaimsManagerAPI claims, OpacSides.Side side,
                                     ResourceLocation dim, int x, int z) {
+        if (side.partyId() == null) return false;
         IPlayerChunkClaimAPI claim = claims.get(dim, x, z);
         if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) return false;
-        return OpacSides.sameSide(side, OpacSides.claimSide(server, claim));
+        return side.partyId().equals(territoryPartyAt(dim, x, z));
     }
 
     private boolean touchesControlledCity(OpacSides.Side side, ResourceLocation dim, int x, int z) {
@@ -1043,11 +1349,60 @@ public final class WarManager {
     }
 
     public void surrender(ServerPlayer player, WarRecord war) {
-        if (isAttacker(war, player.getUUID())) finish(war, false);
-        else if (OpacSides.isMember(server, player.getUUID(), war.defenderPartyId, war.defenderOwnerId)) finish(war, true);
+        IServerPartyAPI currentParty = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(player.getUUID());
+        if (currentParty == null || !currentParty.getOwner().getUUID().equals(player.getUUID())) return;
+
+        if (currentParty.getId().equals(war.attackerPartyId)) finish(war, false);
+        else if (war.defenderPartyId != null && currentParty.getId().equals(war.defenderPartyId)) finish(war, true);
+    }
+
+    private void handlePreparationActivation(WarRecord war, ServerLevel level) {
+        boolean attackerOnline = rosterHasOnlinePlayer(war.attackerRoster);
+        boolean defenderRequired = war.defenderPartyId != null && WarConfig.REQUIRE_ONLINE_DEFENDER.get();
+        boolean defenderOnline = !defenderRequired || rosterHasOnlinePlayer(war.defenderRoster);
+
+        if (attackerOnline && defenderOnline) {
+            activate(war);
+            return;
+        }
+
+        long now = level.getGameTime();
+        if (war.onlineGraceDeadlineGameTime <= 0L) {
+            int graceMinutes = WarConfig.ACTIVATION_ONLINE_GRACE_MINUTES.get();
+            war.onlineGraceDeadlineGameTime = now + graceMinutes * 60L * 20L;
+            data.changed();
+
+            broadcast(Component.literal("WAR WAITING: activation is paused for up to " + graceMinutes
+                    + " minute(s) because a required frozen-roster side has no player online.")
+                    .withStyle(ChatFormatting.YELLOW));
+
+            if (graceMinutes > 0) return;
+        }
+
+        if (now < war.onlineGraceDeadlineGameTime) return;
+
+        if (!attackerOnline) {
+            broadcast(Component.literal("WAR FORFEIT: the attacking roster had no player online before the activation grace period expired.")
+                    .withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
+            finish(war, false);
+        } else if (!defenderOnline) {
+            broadcast(Component.literal("WAR FORFEIT: the defending roster remained offline through the activation grace period.")
+                    .withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
+            finish(war, true);
+        }
+    }
+
+    private boolean rosterHasOnlinePlayer(Set<UUID> roster) {
+        for (UUID playerId : roster) {
+            if (server.getPlayerList().getPlayer(playerId) != null) return true;
+        }
+        return false;
     }
 
     private void activate(WarRecord war) {
+        ServerLevel level = level(war.dimension);
+        if (level == null) return;
+
         if (war.isCityWar()) {
             StrategicCity city = data.getCity(war.cityId);
             if (city == null
@@ -1061,6 +1416,10 @@ public final class WarManager {
 
             war.phase = WarPhase.ACTIVE;
             war.progress = 0.5D;
+            war.onlineGraceDeadlineGameTime = 0L;
+            int maxMinutes = WarConfig.ACTIVE_WAR_MAX_MINUTES.get();
+            war.activeEndsAtGameTime = maxMinutes <= 0 ? 0L
+                    : level.getGameTime() + maxMinutes * 60L * 20L;
             data.changed();
             broadcast(Component.literal("CITY WAR ACTIVE: " + attackerName(war) + " is assaulting " + city.id
                     + " (" + defenderName(war) + "). Capture chunk [" + war.chunkX + ", " + war.chunkZ + "] at Y="
@@ -1071,9 +1430,12 @@ public final class WarManager {
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         IPlayerChunkClaimAPI current = claims.get(war.dimension, war.chunkX, war.chunkZ);
-        if (current == null || war.originalClaimOwner == null || !current.getPlayerId().equals(war.originalClaimOwner)) {
+        if (current == null
+                || SpecialClaimOwners.SERVER.equals(current.getPlayerId())
+                || war.defenderPartyId == null
+                || !territoryBelongsTo(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId)) {
             data.remove(war.id);
-            broadcast(Component.literal("WAR: battle cancelled because target ownership changed before activation.")
+            broadcast(Component.literal("WAR: battle cancelled because the target is no longer registered to the defending nation.")
                     .withStyle(ChatFormatting.RED));
             return;
         }
@@ -1081,6 +1443,10 @@ public final class WarManager {
         claims.claim(war.dimension, SpecialClaimOwners.SERVER, 0, war.chunkX, war.chunkZ, false);
         war.phase = WarPhase.ACTIVE;
         war.progress = 0.5D;
+        war.onlineGraceDeadlineGameTime = 0L;
+        int maxMinutes = WarConfig.ACTIVE_WAR_MAX_MINUTES.get();
+        war.activeEndsAtGameTime = maxMinutes <= 0 ? 0L
+                : level.getGameTime() + maxMinutes * 60L * 20L;
         data.changed();
 
         broadcast(Component.literal("WAR ACTIVE: " + attackerName(war) + " vs " + defenderName(war)
@@ -1091,6 +1457,10 @@ public final class WarManager {
     }
 
     private void finish(WarRecord war, boolean attackerWon) {
+        finish(war, attackerWon, true);
+    }
+
+    private void finish(WarRecord war, boolean attackerWon, boolean collapseCapturedCapital) {
         if (war.isCityWar()) {
             StrategicCity city = data.getCity(war.cityId);
             if (city == null) {
@@ -1101,7 +1471,7 @@ public final class WarManager {
             if (attackerWon) {
                 String previous = cityControllerName(city);
                 city.controllerPartyId = war.attackerPartyId;
-                city.controllerOwnerId = war.attackerOwnerId;
+                city.controllerOwnerId = currentPartyOwnerOr(war.attackerPartyId, war.attackerOwnerId);
                 data.remove(war.id);
                 data.changed();
                 broadcast(Component.literal("CITY CAPTURED: " + attackerName(war) + " took " + city.id
@@ -1117,7 +1487,11 @@ public final class WarManager {
         }
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        UUID newOwner = attackerWon ? war.attackerOwnerId : war.originalClaimOwner;
+        UUID newOwner = attackerWon
+                ? currentPartyOwnerOr(war.attackerPartyId, war.attackerOwnerId)
+                : (war.defenderPartyId == null
+                    ? war.originalClaimOwner
+                    : currentPartyOwnerOr(war.defenderPartyId, war.originalClaimOwner));
         if (newOwner == null) {
             data.remove(war.id);
             return;
@@ -1126,6 +1500,12 @@ public final class WarManager {
         int sub = attackerWon ? 0 : war.originalSubConfig;
         boolean forceload = attackerWon ? false : war.originalForceload;
         claims.claim(war.dimension, newOwner, sub, war.chunkX, war.chunkZ, forceload);
+
+        if (attackerWon) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.attackerPartyId);
+        } else if (war.defenderPartyId != null) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId);
+        }
 
         boolean capturedCapital = attackerWon
                 && war.defenderPartyId != null
@@ -1139,7 +1519,9 @@ public final class WarManager {
                 : "WAR DEFENDED: " + defenderName(war) + " held chunk [" + war.chunkX + ", " + war.chunkZ + "] against " + attackerName(war) + ".")
                 .withStyle(attackerWon ? ChatFormatting.GREEN : ChatFormatting.AQUA, ChatFormatting.BOLD));
 
-        if (capturedCapital) collapseNation(war.defenderPartyId, war.defenderOwnerId);
+        if (capturedCapital && collapseCapturedCapital) {
+            collapseNation(war.defenderPartyId, war.defenderOwnerId);
+        }
     }
 
     private boolean isCapitalChunk(UUID partyId, ResourceLocation dim, int x, int z) {
@@ -1150,12 +1532,26 @@ public final class WarManager {
     private void collapseNation(UUID partyId, @Nullable UUID ownerId) {
         String name = OpacSides.sideName(server, partyId, ownerId);
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        OpacSides.Side losingSide = new OpacSides.Side(partyId, ownerId == null ? partyId : ownerId, name);
 
-        List<ClaimLocation> ownedClaims = collectClaimsForSide(claims, losingSide);
-        for (ClaimLocation location : ownedClaims) {
-            claims.unclaim(location.dimension, location.x, location.z);
+        // End every other battle involving the collapsed nation before wiping
+        // its territory. Targets the collapsed nation was attacking are restored;
+        // contested chunks it was defending are simply abandoned with the rest
+        // of the collapsed territory.
+        for (WarRecord other : new ArrayList<>(data.wars())) {
+            boolean losingAttacker = partyId.equals(other.attackerPartyId);
+            boolean losingDefender = partyId.equals(other.defenderPartyId);
+            if (!losingAttacker && !losingDefender) continue;
+
+            if (losingAttacker) {
+                applyFailedAttackCooldown(other);
+                if (!other.isCityWar() && other.phase == WarPhase.ACTIVE) restoreOriginalClaim(other);
+            } else if (!other.isCityWar() && other.phase == WarPhase.ACTIVE) {
+                claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
+            }
+            data.remove(other.id);
         }
+
+        int removedClaims = removeNationTerritory(partyId);
 
         for (StrategicCity city : data.cities()) {
             if (partyId.equals(city.controllerPartyId)) {
@@ -1164,36 +1560,35 @@ public final class WarManager {
             }
         }
 
-        List<WarRecord> otherWars = new ArrayList<>(data.wars());
-        for (WarRecord other : otherWars) {
-            boolean losingAttacker = partyId.equals(other.attackerPartyId);
-            boolean losingDefender = partyId.equals(other.defenderPartyId);
-            if (!losingAttacker && !losingDefender) continue;
-
-            if (!other.isCityWar()) {
-                if (losingAttacker && other.phase == WarPhase.ACTIVE) {
-                    restoreOriginalClaim(other);
-                } else if (losingDefender && other.phase == WarPhase.ACTIVE) {
-                    claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
-                }
-            }
-            data.remove(other.id);
-        }
-
         data.removeCapital(partyId);
         data.changed();
 
         broadcast(Component.literal("CAPITAL FALLEN: " + name
-                + " lost its capital. All remaining national claims were removed and its strategic cities became neutral.")
+                + " lost its capital. " + removedClaims
+                + " remaining national claim(s) were removed and its strategic cities became neutral.")
                 .withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD));
     }
 
-    /**
-     * Removes warfare state that references OPaC parties which no longer exist.
-     * This is intentionally checked on startup, once per second, and before
-     * capital/city listings so disbanding a party cannot leave ghost capitals,
-     * city controllers, or wars behind.
-     */
+    private int removeNationTerritory(UUID partyId) {
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        List<TerritoryKey> doomed = new ArrayList<>();
+        for (Map.Entry<TerritoryKey, UUID> entry : data.territoryOwners().entrySet()) {
+            if (partyId.equals(entry.getValue())) doomed.add(entry.getKey());
+        }
+
+        for (TerritoryKey key : doomed) {
+            IPlayerChunkClaimAPI claim = claims.get(key.dimension(), key.chunkX(), key.chunkZ());
+            if (claim != null) {
+                // Nation territory never intentionally points at strategic-city
+                // SERVER claims. If a normal ACTIVE war still owns the physical
+                // chunk as SERVER, unclaiming is still the correct collapse result.
+                claims.unclaim(key.dimension(), key.chunkX(), key.chunkZ());
+            }
+            data.removeTerritory(key);
+        }
+        return doomed.size();
+    }
+
     private void rememberPartySnapshot(UUID partyId) {
         IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
         if (party == null) return;
@@ -1203,10 +1598,10 @@ public final class WarManager {
     }
 
     /**
-     * Keeps warfare state synchronized with OPaC party lifecycle.
-     * A member leaving/kicked from an existing party does NOT remove claims.
-     * Destroying the party itself DOES remove every claim owned by members who
-     * still belonged to that party in the last live roster snapshot.
+     * Keeps the nation registry synchronized with OPaC party lifecycle.
+     * Leaving/kicking a member never transfers or removes nation territory.
+     * Destroying the party resolves its live wars as surrender and then wipes
+     * all remaining territory registered to that nation.
      */
     private void reconcilePartyState() {
         var partyManager = OpenPACServerAPI.get(server).getPartyManager();
@@ -1220,20 +1615,24 @@ public final class WarManager {
             liveRosters.put(party.getId(), members);
         });
 
-        // Detect parties that existed in the prior snapshot but no longer exist.
-        // This corresponds to party destruction/admin removal, not a single
-        // member leaving an otherwise-live party.
         for (Map.Entry<UUID, Set<UUID>> snapshot :
                 new ArrayList<>(data.partyMemberSnapshots().entrySet())) {
             UUID destroyedPartyId = snapshot.getKey();
             if (liveRosters.containsKey(destroyedPartyId)) continue;
 
-            Set<UUID> formerMembers = new LinkedHashSet<>(snapshot.getValue());
-            List<ClaimLocation> doomedClaims = collectClaimsForOwners(claims, formerMembers);
-            for (ClaimLocation location : doomedClaims) {
-                claims.unclaim(location.dimension, location.x, location.z);
+            // Party destruction is surrender, not a way to delete contested
+            // objectives. Suppress normal capital-collapse side effects while
+            // resolving this batch so EVERY already-contested target resolves
+            // before the remaining nation is wiped.
+            for (WarRecord war : new ArrayList<>(data.wars())) {
+                if (destroyedPartyId.equals(war.attackerPartyId)) {
+                    finish(war, false, false);
+                } else if (destroyedPartyId.equals(war.defenderPartyId)) {
+                    finish(war, true, false);
+                }
             }
 
+            int removedClaims = removeNationTerritory(destroyedPartyId);
             data.removeCapital(destroyedPartyId);
             data.clearAttackCooldown(destroyedPartyId);
 
@@ -1248,41 +1647,68 @@ public final class WarManager {
             changed = true;
 
             broadcast(Component.literal("NATION DISBANDED: party " + destroyedPartyId
-                    + " was destroyed. Its " + doomedClaims.size()
-                    + " remaining claim(s) were removed, its capital was cleared, and its strategic cities became Neutral.")
+                    + " was destroyed. Its live wars were resolved as surrender, "
+                    + removedClaims + " remaining claim(s) were removed, its capital was cleared, "
+                    + "and its remaining strategic cities became Neutral.")
                     .withStyle(ChatFormatting.DARK_RED));
         }
 
-        // Refresh the roster for every party that still exists. A member who
-        // simply leaves is therefore removed from this snapshot while all
-        // physical claims remain untouched.
         for (Map.Entry<UUID, Set<UUID>> live : liveRosters.entrySet()) {
-            data.setPartyMemberSnapshot(live.getKey(), live.getValue());
+            UUID partyId = live.getKey();
+            Set<UUID> previous = data.partyMemberSnapshots().get(partyId);
+
+            // OPaC physically stores ordinary claims under player UUIDs. If a
+            // member leaves, keep the land with the nation by moving any of
+            // that player's nation-registered claims to the current party owner.
+            if (previous != null) {
+                Set<UUID> departed = new LinkedHashSet<>(previous);
+                departed.removeAll(live.getValue());
+
+                if (!departed.isEmpty()) {
+                    IServerPartyAPI party = partyManager.getPartyById(partyId);
+                    if (party != null) {
+                        UUID newPhysicalOwner = party.getOwner().getUUID();
+                        for (Map.Entry<TerritoryKey, UUID> territory :
+                                new ArrayList<>(data.territoryOwners().entrySet())) {
+                            if (!partyId.equals(territory.getValue())) continue;
+
+                            TerritoryKey key = territory.getKey();
+                            IPlayerChunkClaimAPI claim = claims.get(
+                                    key.dimension(), key.chunkX(), key.chunkZ());
+                            if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) continue;
+                            if (!departed.contains(claim.getPlayerId())) continue;
+
+                            claims.claim(key.dimension(), newPhysicalOwner,
+                                    claim.getSubConfigIndex(), key.chunkX(), key.chunkZ(),
+                                    claim.isForceloadable());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            data.setPartyMemberSnapshot(partyId, live.getValue());
         }
 
-        // A capital is valid only while the party exists AND the recorded chunk
-        // is still actually owned by that party.
+        // Capital validity is based on the nation registry, not on the original
+        // OPaC claim owner's current party. A capital under ACTIVE attack is
+        // physically SERVER-owned but remains registered to its defender until
+        // the battle resolves.
         for (CapitalRecord capital : new ArrayList<>(data.capitals())) {
             IServerPartyAPI party = partyManager.getPartyById(capital.partyId);
-            boolean valid = party != null;
+            boolean valid = party != null
+                    && territoryBelongsTo(capital.dimension, capital.chunkX, capital.chunkZ, capital.partyId);
 
-            if (valid) {
-                IPlayerChunkClaimAPI claim = claims.get(capital.dimension, capital.chunkX, capital.chunkZ);
-                valid = claim != null
-                        && !SpecialClaimOwners.SERVER.equals(claim.getPlayerId())
-                        && OpacSides.isMember(server, claim.getPlayerId(), capital.partyId, party.getOwner().getUUID());
-
-                if (valid && !Objects.equals(capital.ownerId, party.getOwner().getUUID())) {
-                    capital.ownerId = party.getOwner().getUUID();
-                    changed = true;
-                }
+            if (valid && !Objects.equals(capital.ownerId, party.getOwner().getUUID())) {
+                capital.ownerId = party.getOwner().getUUID();
+                changed = true;
             }
 
             if (!valid) {
                 data.removeCapital(capital.partyId);
                 changed = true;
                 OpacWarfare1201.LOGGER.info(
-                        "Removed orphaned capital for missing/invalid party {} at {} [{}, {}]",
+                        "Removed invalid capital for party {} at {} [{}, {}]",
                         capital.partyId, capital.dimension, capital.chunkX, capital.chunkZ);
             }
         }
@@ -1292,9 +1718,6 @@ public final class WarManager {
 
             IServerPartyAPI party = partyManager.getPartyById(city.controllerPartyId);
             if (party == null) {
-                OpacWarfare1201.LOGGER.info(
-                        "Strategic city {} became Neutral because controller party {} no longer exists",
-                        city.id, city.controllerPartyId);
                 city.controllerPartyId = null;
                 city.controllerOwnerId = null;
                 changed = true;
@@ -1304,71 +1727,41 @@ public final class WarManager {
             }
         }
 
+        // Safety net for old/corrupt saves where a party vanished without ever
+        // being present in our roster snapshot.
         for (WarRecord war : new ArrayList<>(data.wars())) {
-            boolean attackerMissing = war.attackerPartyId == null
-                    || partyManager.getPartyById(war.attackerPartyId) == null;
+            boolean attackerMissing = partyManager.getPartyById(war.attackerPartyId) == null;
             boolean defenderMissing = war.defenderPartyId != null
                     && partyManager.getPartyById(war.defenderPartyId) == null;
 
-            if (!attackerMissing && !defenderMissing) continue;
-
-            if (!war.isCityWar() && war.phase == WarPhase.ACTIVE) {
-                if (attackerMissing && !defenderMissing) {
-                    restoreOriginalClaim(war);
-                } else {
-                    // The defender party no longer exists, so do not resurrect
-                    // one of its claims while cleaning the contested chunk.
-                    claims.unclaim(war.dimension, war.chunkX, war.chunkZ);
-                }
+            if (attackerMissing) {
+                finish(war, false);
+                changed = true;
+            } else if (defenderMissing) {
+                finish(war, true);
+                changed = true;
             }
-
-            data.remove(war.id);
-            changed = true;
-            OpacWarfare1201.LOGGER.info(
-                    "Stopped war {} because an involved OPaC party no longer exists",
-                    war.id);
         }
 
         if (changed) data.changed();
     }
 
-    private List<ClaimLocation> collectClaimsForOwners(IServerClaimsManagerAPI claims, Set<UUID> owners) {
-        List<ClaimLocation> result = new ArrayList<>();
-        if (owners.isEmpty()) return result;
-
-        claims.getPlayerInfoStream().forEach(info -> {
-            if (!owners.contains(info.getPlayerId())) return;
-            info.getStream().forEach(entry -> {
-                ResourceLocation dim = entry.getKey();
-                entry.getValue().getStream().forEach(list ->
-                        list.getStream().forEach(cp -> result.add(new ClaimLocation(dim, cp.x, cp.z))));
-            });
-        });
-        return result;
-    }
-
-    private List<ClaimLocation> collectClaimsForSide(IServerClaimsManagerAPI claims, OpacSides.Side side) {
-        List<ClaimLocation> result = new ArrayList<>();
-        claims.getPlayerInfoStream().forEach(info -> {
-            if (!OpacSides.isMember(server, info.getPlayerId(), side.partyId(), side.ownerId())) return;
-            info.getStream().forEach(entry -> {
-                ResourceLocation dim = entry.getKey();
-                entry.getValue().getStream().forEach(list ->
-                        list.getStream().forEach(cp -> result.add(new ClaimLocation(dim, cp.x, cp.z))));
-            });
-        });
-        return result;
-    }
-
     private void restoreOriginalClaim(WarRecord war) {
-        if (war.originalClaimOwner == null) return;
+        UUID owner = war.defenderPartyId == null
+                ? war.originalClaimOwner
+                : currentPartyOwnerOr(war.defenderPartyId, war.originalClaimOwner);
+        if (owner == null) return;
+
         OpenPACServerAPI.get(server).getServerClaimsManager().claim(
                 war.dimension,
-                war.originalClaimOwner,
+                owner,
                 war.originalSubConfig,
                 war.chunkX,
                 war.chunkZ,
                 war.originalForceload);
+        if (war.defenderPartyId != null) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId);
+        }
     }
 
     private void tickSecond() {
@@ -1393,7 +1786,16 @@ public final class WarManager {
             showCaptureObjective(war, level);
 
             if (war.phase == WarPhase.PREPARING) {
-                if (level.getGameTime() >= war.activateAtGameTime) activate(war);
+                if (level.getGameTime() >= war.activateAtGameTime) {
+                    handlePreparationActivation(war, level);
+                }
+                continue;
+            }
+
+            if (war.activeEndsAtGameTime > 0L && level.getGameTime() >= war.activeEndsAtGameTime) {
+                broadcast(Component.literal("WAR TIME LIMIT: defenders held the objective until the battle timer expired.")
+                        .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+                finish(war, false);
                 continue;
             }
 
@@ -1403,9 +1805,13 @@ public final class WarManager {
 
             double perSecond = 0.5D / WarConfig.CAPTURE_SECONDS_FROM_MIDPOINT.get();
             if (attackers > defenders) {
-                war.progress += perSecond * (attackers - defenders);
+                int advantage = attackers - defenders;
+                double multiplier = Math.min(WarConfig.CAPTURE_MAX_MULTIPLIER.get(), Math.sqrt(advantage));
+                war.progress += perSecond * multiplier;
             } else if (defenders > attackers) {
-                war.progress -= perSecond * (defenders - attackers);
+                int advantage = defenders - attackers;
+                double multiplier = Math.min(WarConfig.CAPTURE_MAX_MULTIPLIER.get(), Math.sqrt(advantage));
+                war.progress -= perSecond * multiplier;
             } else if (attackers == 0 && defenders == 0) {
                 double decay = 0.5D / WarConfig.EMPTY_DECAY_SECONDS.get();
                 if (war.progress > 0.5D) war.progress = Math.max(0.5D, war.progress - decay);
@@ -1536,7 +1942,9 @@ public final class WarManager {
         WarRecord war = m.activeWarAt(player.level().dimension().location(), cp.x, cp.z);
         if (war == null || !m.isParticipant(war, player.getUUID(), false) || WarConfig.WAR_LIVES.get() <= 0) return;
 
-        int left = Math.max(0, war.lives.getOrDefault(player.getUUID(), WarConfig.WAR_LIVES.get()) - 1);
+        int current = war.lives.getOrDefault(player.getUUID(), WarConfig.WAR_LIVES.get());
+        if (current <= 0) return;
+        int left = Math.max(0, current - 1);
         war.lives.put(player.getUUID(), left);
         m.data.changed();
 

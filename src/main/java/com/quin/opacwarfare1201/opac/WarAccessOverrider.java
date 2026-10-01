@@ -49,6 +49,14 @@ public final class WarAccessOverrider implements IChunkAccessOverriderAPI {
             return new ChunkAccessOverride(ChunkAccessOverrideType.PROTECT);
         }
 
+        UUID nationOwner = manager.territoryPartyAt(dim, x, z);
+        if (nationOwner != null) {
+            if (manager.isCurrentPartyMember(accessorId, nationOwner)) {
+                return new ChunkAccessOverride(ChunkAccessOverrideType.ALLOW);
+            }
+            return new ChunkAccessOverride(ChunkAccessOverrideType.PROTECT);
+        }
+
         return currentOverride;
     }
 }

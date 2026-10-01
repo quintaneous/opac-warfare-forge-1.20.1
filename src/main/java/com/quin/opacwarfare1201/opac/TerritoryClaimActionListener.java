@@ -51,5 +51,6 @@ public final class TerritoryClaimActionListener implements IClaimActionListenerA
             @Nonnull ClaimingAction action,
             @Nonnull IServerClaimsManagerAPI claimsManagerAPI,
             @Nonnull MinecraftServer server) {
+        WarManager.get(server).handleSuccessfulClaimAction(playerId, dim, x, z, action);
     }
 }

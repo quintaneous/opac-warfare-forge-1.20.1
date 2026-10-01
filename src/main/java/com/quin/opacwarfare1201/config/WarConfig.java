@@ -18,6 +18,14 @@ public final class WarConfig {
     public static final ForgeConfigSpec.IntValue EMPTY_DECAY_SECONDS;
     public static final ForgeConfigSpec.IntValue CITY_FORTIFICATION_BUDGET_3X3;
     public static final ForgeConfigSpec.IntValue FAILED_ATTACK_COOLDOWN_MINUTES;
+    public static final ForgeConfigSpec.IntValue ACTIVE_WAR_MAX_MINUTES;
+    public static final ForgeConfigSpec.IntValue ACTIVATION_ONLINE_GRACE_MINUTES;
+    public static final ForgeConfigSpec.IntValue MAX_CONCURRENT_DEFENSIVE_WARS;
+    public static final ForgeConfigSpec.DoubleValue CAPTURE_MAX_MULTIPLIER;
+    public static final ForgeConfigSpec.IntValue CITY_CAPTURE_NO_BUILD_RADIUS;
+    public static final ForgeConfigSpec.IntValue CBC_MANUAL_LOAD_MAX_DISTANCE;
+    public static final ForgeConfigSpec.BooleanValue BLOCK_FLUIDS_DURING_CITY_SIEGE;
+    public static final ForgeConfigSpec.BooleanValue ISOLATE_WAR_COMBAT;
 
     static {
         ForgeConfigSpec.Builder b = new ForgeConfigSpec.Builder();
@@ -49,6 +57,32 @@ public final class WarConfig {
                         "Minutes an attacking nation must wait before starting another offensive war after it fails to capture a normal chunk or strategic city.",
                         "Attacker surrender also counts as a failed attack. Successful captures and admin-stopped wars do not apply a cooldown. 0 disables this rule.")
                 .defineInRange("failedAttackCooldownMinutes", 30, 0, 1440);
+        ACTIVE_WAR_MAX_MINUTES = b.comment(
+                        "Maximum ACTIVE battle duration. If time expires before attackers capture the objective, defenders win. 0 disables the timeout.")
+                .defineInRange("activeWarMaxMinutes", 60, 0, 1440);
+        ACTIVATION_ONLINE_GRACE_MINUTES = b.comment(
+                        "When PREPARING ends, both frozen rosters must have an online player (defender requirement obeys requireOnlineDefender).",
+                        "If a side is missing, activation waits this many minutes. At expiry, an absent attacker loses; otherwise an absent defender forfeits.")
+                .defineInRange("activationOnlineGraceMinutes", 5, 0, 60);
+        MAX_CONCURRENT_DEFENSIVE_WARS = b.comment(
+                        "Maximum simultaneous wars in which one nation may be the defender. 0 means unlimited.")
+                .defineInRange("maxConcurrentDefensiveWars", 2, 0, 16);
+        CAPTURE_MAX_MULTIPLIER = b.comment(
+                        "Maximum capture-speed multiplier from numerical advantage. Scaling uses sqrt(player advantage), capped here.")
+                .defineInRange("captureMaxMultiplier", 2.0D, 1.0D, 5.0D);
+        CITY_CAPTURE_NO_BUILD_RADIUS = b.comment(
+                        "Horizontal block radius around a strategic city's capture point where structural defender construction is blocked during ACTIVE.",
+                        "CBC ammunition loading is still allowed when it qualifies as actual cannon loading.")
+                .defineInRange("cityCaptureNoBuildRadius", 4, 0, 16);
+        CBC_MANUAL_LOAD_MAX_DISTANCE = b.comment(
+                        "Maximum straight-line distance from a placed CBC munition to an existing CBC cannon structure for the siege reload exception.")
+                .defineInRange("cbcManualLoadMaxDistance", 8, 1, 16);
+        BLOCK_FLUIDS_DURING_CITY_SIEGE = b.comment(
+                        "Block player/world fluid placement and fluid-generated block changes inside strategic cities while a siege is PREPARING or ACTIVE.")
+                .define("blockFluidsDuringCitySiege", true);
+        ISOLATE_WAR_COMBAT = b.comment(
+                        "Inside ACTIVE battlefields, only frozen-roster opponents with remaining lives may damage each other.")
+                .define("isolateWarCombat", true);
         b.pop();
 
         b.push("territory");
