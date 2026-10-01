@@ -57,15 +57,18 @@ public final class WarManager {
     }
 
     public Collection<CapitalRecord> capitals() {
+        reconcilePartyState();
         return Collections.unmodifiableCollection(data.capitals());
     }
 
     public Collection<StrategicCity> cities() {
+        reconcilePartyState();
         return Collections.unmodifiableCollection(data.cities());
     }
 
     @Nullable
     public CapitalRecord capital(UUID partyId) {
+        reconcilePartyState();
         return data.getCapital(partyId);
     }
 
@@ -211,6 +214,7 @@ public final class WarManager {
     }
 
     public void onServerStarted() {
+        reconcilePartyState();
         boolean changed = false;
         for (WarRecord war : data.wars()) {
             ServerLevel level = level(war.dimension);
@@ -750,7 +754,9 @@ public final class WarManager {
     public String validateNormalClaimAction(UUID playerId, ResourceLocation dim, int x, int z,
                                             ClaimingAction action, IServerClaimsManagerAPI claims) {
         OpacSides.Side side = OpacSides.playerSide(server, playerId);
-        if (side == null || side.partyId() == null) return null;
+        if (side == null || side.partyId() == null) {
+            return "You must create or join an OPaC party before claiming, unclaiming, or changing claim forceloading.";
+        }
 
         if (action == ClaimingAction.CLAIM && WarConfig.REQUIRE_CONTIGUOUS_CLAIMS.get()) {
             IPlayerChunkClaimAPI current = claims.get(dim, x, z);
@@ -1144,6 +1150,81 @@ public final class WarManager {
                 .withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD));
     }
 
+    /**
+     * Removes warfare state that references OPaC parties which no longer exist.
+     * This is intentionally checked on startup, once per second, and before
+     * capital/city listings so disbanding a party cannot leave ghost capitals,
+     * city controllers, or wars behind.
+     */
+    private void reconcilePartyState() {
+        var partyManager = OpenPACServerAPI.get(server).getPartyManager();
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        boolean changed = false;
+
+        for (CapitalRecord capital : new ArrayList<>(data.capitals())) {
+            IServerPartyAPI party = partyManager.getPartyById(capital.partyId);
+            boolean valid = party != null;
+
+            if (valid) {
+                IPlayerChunkClaimAPI claim = claims.get(capital.dimension, capital.chunkX, capital.chunkZ);
+                valid = claim != null
+                        && !SpecialClaimOwners.SERVER.equals(claim.getPlayerId())
+                        && OpacSides.isMember(server, claim.getPlayerId(), capital.partyId, party.getOwner().getUUID());
+
+                if (valid && !Objects.equals(capital.ownerId, party.getOwner().getUUID())) {
+                    capital.ownerId = party.getOwner().getUUID();
+                    changed = true;
+                }
+            }
+
+            if (!valid) {
+                data.removeCapital(capital.partyId);
+                changed = true;
+                OpacWarfare1201.LOGGER.info(
+                        "Removed orphaned capital for missing/invalid party {} at {} [{}, {}]",
+                        capital.partyId, capital.dimension, capital.chunkX, capital.chunkZ);
+            }
+        }
+
+        for (StrategicCity city : data.cities()) {
+            if (city.controllerPartyId == null) continue;
+
+            IServerPartyAPI party = partyManager.getPartyById(city.controllerPartyId);
+            if (party == null) {
+                OpacWarfare1201.LOGGER.info(
+                        "Strategic city {} became Neutral because controller party {} no longer exists",
+                        city.id, city.controllerPartyId);
+                city.controllerPartyId = null;
+                city.controllerOwnerId = null;
+                changed = true;
+            } else if (!Objects.equals(city.controllerOwnerId, party.getOwner().getUUID())) {
+                city.controllerOwnerId = party.getOwner().getUUID();
+                changed = true;
+            }
+        }
+
+        for (WarRecord war : new ArrayList<>(data.wars())) {
+            boolean attackerMissing = war.attackerPartyId == null
+                    || partyManager.getPartyById(war.attackerPartyId) == null;
+            boolean defenderMissing = war.defenderPartyId != null
+                    && partyManager.getPartyById(war.defenderPartyId) == null;
+
+            if (!attackerMissing && !defenderMissing) continue;
+
+            if (!war.isCityWar() && war.phase == WarPhase.ACTIVE) {
+                restoreOriginalClaim(war);
+            }
+
+            data.remove(war.id);
+            changed = true;
+            OpacWarfare1201.LOGGER.info(
+                    "Stopped war {} because an involved OPaC party no longer exists",
+                    war.id);
+        }
+
+        if (changed) data.changed();
+    }
+
     private List<ClaimLocation> collectClaimsForSide(IServerClaimsManagerAPI claims, OpacSides.Side side) {
         List<ClaimLocation> result = new ArrayList<>();
         claims.getPlayerInfoStream().forEach(info -> {
@@ -1169,6 +1250,7 @@ public final class WarManager {
     }
 
     private void tickSecond() {
+        reconcilePartyState();
         tickCapitalMarkers();
         tickCityMarkers();
 
