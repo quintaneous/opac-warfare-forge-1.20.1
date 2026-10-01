@@ -47,14 +47,26 @@ public final class CBCArmorClassifier {
      * infantry breaching tiers. CBC remains the source of truth for the block;
      * these thresholds only decide the minimum hand-mining time in a city siege.
      */
-    public static float minimumSiegeBreakSeconds(Level level, BlockState state, BlockPos pos) {
+    public static SiegeBreakWindow siegeBreakWindow(Level level, BlockState state, BlockPos pos) {
         ArmorValues v = armor(level, state, pos);
         double score = v.hardness() + v.toughness() / 4D;
 
-        if (score < 2D) return 2F;
-        if (score < 3D) return 4F;
-        if (score < 4.5D) return 6F;
-        return 8F;
+        // The lower number prevents Efficiency/Haste from trivializing walls.
+        // The upper number is an infantry fallback resistance cap for a player
+        // using the correct tool, so even unusually resistant modded blocks do
+        // not become effectively invincible. CBC remains the preferred breach.
+        if (score < 2D) return new SiegeBreakWindow(2F, 4F);
+        if (score < 3D) return new SiegeBreakWindow(4F, 6F);
+        if (score < 4.5D) return new SiegeBreakWindow(6F, 8F);
+        return new SiegeBreakWindow(8F, 10F);
+    }
+
+    public static float minimumSiegeBreakSeconds(Level level, BlockState state, BlockPos pos) {
+        return siegeBreakWindow(level, state, pos).minimumSeconds();
+    }
+
+    public static float maximumSiegeBreakSeconds(Level level, BlockState state, BlockPos pos) {
+        return siegeBreakWindow(level, state, pos).maximumSeconds();
     }
 
     private static synchronized void init() {
@@ -89,4 +101,5 @@ public final class CBCArmorClassifier {
     }
 
     public record ArmorValues(double hardness, double toughness) {}
+    public record SiegeBreakWindow(float minimumSeconds, float maximumSeconds) {}
 }
