@@ -316,15 +316,26 @@ public final class WarManager {
     }
 
     public long remainingAttackCooldownSeconds(UUID partyId) {
-        long until = data.attackCooldownUntil(partyId);
-        if (until <= 0L) return 0L;
+        return remainingAttackCooldownSeconds(partyId, null);
+    }
 
-        long remainingMillis = until - System.currentTimeMillis();
-        if (remainingMillis <= 0L) {
+    public long remainingAttackCooldownSeconds(UUID partyId, @Nullable UUID playerId) {
+        long now = System.currentTimeMillis();
+        long partyUntil = data.attackCooldownUntil(partyId);
+        long playerUntil = playerId == null ? 0L : data.playerAttackCooldownUntil(playerId);
+
+        if (partyUntil > 0L && partyUntil <= now) {
             data.clearAttackCooldown(partyId);
-            return 0L;
+            partyUntil = 0L;
         }
-        return (remainingMillis + 999L) / 1000L;
+        if (playerId != null && playerUntil > 0L && playerUntil <= now) {
+            data.clearPlayerAttackCooldown(playerId);
+            playerUntil = 0L;
+        }
+
+        long until = Math.max(partyUntil, playerUntil);
+        if (until <= 0L) return 0L;
+        return (until - now + 999L) / 1000L;
     }
 
     private void applyFailedAttackCooldown(WarRecord war) {
@@ -333,6 +344,14 @@ public final class WarManager {
 
         long until = System.currentTimeMillis() + minutes * 60_000L;
         data.setAttackCooldownUntil(war.attackerPartyId, until);
+
+        IServerPartyAPI attackingParty = OpenPACServerAPI.get(server).getPartyManager().getPartyById(war.attackerPartyId);
+        if (attackingParty != null) {
+            attackingParty.getMemberInfoStream()
+                    .forEach(member -> data.setPlayerAttackCooldownUntil(member.getUUID(), until));
+        } else if (war.attackerOwnerId != null) {
+            data.setPlayerAttackCooldownUntil(war.attackerOwnerId, until);
+        }
 
         broadcast(Component.literal("ATTACK COOLDOWN: " + attackerName(war)
                 + " failed to capture its target and cannot start another offensive war for "
@@ -378,7 +397,7 @@ public final class WarManager {
             return StartResult.fail("You cannot attack your own party's claim.");
         }
 
-        String commonFailure = validateAttackerCanStartWar(attackerSide);
+        String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
 
         if (WarConfig.REQUIRE_ONLINE_DEFENDER.get()
@@ -444,7 +463,7 @@ public final class WarManager {
             return StartResult.fail("Your nation already controls " + city.id + ".");
         }
 
-        String commonFailure = validateAttackerCanStartWar(attackerSide);
+        String commonFailure = validateAttackerCanStartWar(attackerSide, attacker.getUUID());
         if (commonFailure != null) return StartResult.fail(commonFailure);
 
         if (city.controllerPartyId != null
@@ -489,12 +508,12 @@ public final class WarManager {
     }
 
     @Nullable
-    private String validateAttackerCanStartWar(OpacSides.Side attackerSide) {
+    private String validateAttackerCanStartWar(OpacSides.Side attackerSide, UUID initiatingPlayerId) {
         if (attackerSide.partyId() == null || data.getCapital(attackerSide.partyId()) == null) {
             return "Your nation must set a capital with /war capital set before starting a war.";
         }
 
-        long cooldownSeconds = remainingAttackCooldownSeconds(attackerSide.partyId());
+        long cooldownSeconds = remainingAttackCooldownSeconds(attackerSide.partyId(), initiatingPlayerId);
         if (cooldownSeconds > 0L) {
             return "Your nation is on an offensive-war cooldown after a failed attack. Time remaining: "
                     + formatCooldown(cooldownSeconds) + ".";
