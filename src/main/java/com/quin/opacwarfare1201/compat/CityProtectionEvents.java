@@ -141,9 +141,20 @@ public final class CityProtectionEvents {
         StrategicCity city = manager.cityAtBlock(level.dimension().location(), event.getPos());
         if (city == null) return;
 
-        // The city freezes the instant a siege enters PREPARING. No attacker
-        // instant cover and no defender repair/rebuild during PREPARING/ACTIVE.
-        if (manager.anyWarForCity(city.id) != null) {
+        WarRecord war = manager.anyWarForCity(city.id);
+        if (war != null) {
+            // CBC manual loading physically places projectile/propellant blocks.
+            // Treat those as ammunition state, not construction, so eligible
+            // participants can load/reload manual big cannons during PREPARING
+            // and ACTIVE. The exception is intentionally limited to CBC's own
+            // BigCannonMunitionBlock interface; cannon structure, armor, loaders,
+            // and every other block remain frozen.
+            if (event.getEntity() instanceof ServerPlayer player
+                    && manager.isParticipant(war, player.getUUID(), true)
+                    && CBCMunitionClassifier.isBigCannonMunition(event.getPlacedBlock().getBlock())) {
+                return;
+            }
+
             event.setCanceled(true);
             return;
         }
