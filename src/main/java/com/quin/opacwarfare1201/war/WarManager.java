@@ -180,6 +180,10 @@ public final class WarManager {
                 && isParticipant(war, playerId, true);
     }
 
+    public boolean isCurrentSiegePlacement(WarRecord war, BlockPos pos) {
+        return war.siegePlacements.containsKey(pos.asLong());
+    }
+
     public boolean isInsideCityCaptureNoBuildCore(StrategicCity city, BlockPos pos) {
         int radius = WarConfig.CITY_CAPTURE_NO_BUILD_RADIUS.get();
         if (radius <= 0) return false;
