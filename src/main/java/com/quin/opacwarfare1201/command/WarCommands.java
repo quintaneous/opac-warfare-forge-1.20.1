@@ -65,6 +65,24 @@ public final class WarCommands {
                                                         ctx.getSource(),
                                                         StringArgumentType.getString(ctx, "cityId"),
                                                         StringArgumentType.getString(ctx, "partyIdOrNeutral")))))))
+                        .then(Commands.literal("breachable")
+                                .requires(src -> src.hasPermission(2))
+                                .then(Commands.argument("cityId", StringArgumentType.word())
+                                        .then(Commands.argument("radiusBlocks", IntegerArgumentType.integer(1, 64))
+                                                .executes(ctx -> editCityProtection(
+                                                        ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "cityId"),
+                                                        IntegerArgumentType.getInteger(ctx, "radiusBlocks"),
+                                                        false)))))
+                        .then(Commands.literal("permanent")
+                                .requires(src -> src.hasPermission(2))
+                                .then(Commands.argument("cityId", StringArgumentType.word())
+                                        .then(Commands.argument("radiusBlocks", IntegerArgumentType.integer(1, 64))
+                                                .executes(ctx -> editCityProtection(
+                                                        ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "cityId"),
+                                                        IntegerArgumentType.getInteger(ctx, "radiusBlocks"),
+                                                        true)))))
                 .then(Commands.literal("admin")
                         .requires(src -> src.hasPermission(2))
                         .then(Commands.literal("stop")
@@ -127,12 +145,23 @@ public final class WarCommands {
                             : "Chunk [" + war.chunkX + ", " + war.chunkZ + "]";
                     int progress = (int)Math.round(war.progress * 100D);
                     int maxLives = WarConfig.WAR_LIVES.get();
-                    String lives = maxLives <= 0
-                            ? "unlimited"
-                            : String.valueOf(war.lives.getOrDefault(player.getUUID(), maxLives));
+                    String lives;
+                    if (!war.isParticipant(player.getUUID())) {
+                        lives = "not rostered";
+                    } else {
+                        lives = maxLives <= 0
+                                ? "unlimited"
+                                : String.valueOf(war.lives.getOrDefault(player.getUUID(), maxLives));
+                    }
+
+                    long remaining = war.phase == com.quin.opacwarfare1201.war.WarPhase.ACTIVE
+                            ? manager.remainingBattleSeconds(war)
+                            : manager.remainingPreparationSeconds(war);
+                    String timer = remaining < 0 ? "" : "   Timer: " + WarManager.formatCooldown(remaining);
 
                     lines.add((attacker ? "R|" : "B|") + role + " - " + target + " - " + war.phase);
-                    lines.add("D|Control: " + progress + "% attacker   Your lives: " + lives);
+                    lines.add("D|Control: " + progress + "% attacker   Your lives: " + lives + timer);
+                    lines.add("D|Frozen rosters: A=" + war.attackerRoster.size() + " D=" + war.defenderRoster.size());
                 }
                 if (!hasWar) lines.add("D|No active or preparing wars.");
 
@@ -460,24 +489,48 @@ public final class WarCommands {
         return 1;
     }
 
+    private static int editCityProtection(CommandSourceStack src, String cityId,
+                                                  int radiusBlocks, boolean permanent) {
+        try {
+            ServerPlayer admin = src.getPlayerOrException();
+            WarManager.CityResult result = WarManager.get(src.getServer())
+                    .setCityProtectionAround(admin, cityId, radiusBlocks, permanent);
+            if (!result.success()) {
+                src.sendFailure(Component.literal(result.message()));
+                return 0;
+            }
+            src.sendSuccess(() -> Component.literal(result.message())
+                    .withStyle(permanent ? ChatFormatting.GOLD : ChatFormatting.YELLOW), true);
+            return 1;
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("City protection edit failed: " + e.getMessage()));
+            return 0;
+        }
+    }
+
     private static int surrender(CommandSourceStack src) {
         try {
             ServerPlayer p = src.getPlayerOrException();
             IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(p.getUUID());
-            if (party != null && !party.getOwner().getUUID().equals(p.getUUID())) {
-                src.sendFailure(Component.literal("Only the party owner can surrender in this beta."));
+            if (party == null) {
+                src.sendFailure(Component.literal("You are not in an OPaC party."));
+                return 0;
+            }
+            if (!party.getOwner().getUUID().equals(p.getUUID())) {
+                src.sendFailure(Component.literal("Only the party owner can surrender."));
                 return 0;
             }
 
             WarManager m = WarManager.get(src.getServer());
             for (WarRecord w : m.wars()) {
-                if (m.isParticipant(w, p.getUUID(), false)) {
+                if (party.getId().equals(w.attackerPartyId)
+                        || party.getId().equals(w.defenderPartyId)) {
                     m.surrender(p, w);
                     return 1;
                 }
             }
 
-            src.sendFailure(Component.literal("Your side is not in a war."));
+            src.sendFailure(Component.literal("Your nation is not in a war."));
             return 0;
         } catch (Exception e) {
             src.sendFailure(Component.literal("Surrender failed: " + e.getMessage()));
