@@ -1,5 +1,6 @@
 package com.quin.opacwarfare1201.compat;
 
+import com.quin.opacwarfare1201.config.WarConfig;
 import com.quin.opacwarfare1201.war.StrategicCity;
 import com.quin.opacwarfare1201.war.WarManager;
 import com.quin.opacwarfare1201.war.WarPhase;
@@ -8,8 +9,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.level.ExplosionEvent;
 import net.minecraftforge.event.level.PistonEvent;
@@ -48,25 +51,33 @@ public final class CityProtectionEvents {
             return;
         }
 
-        // During ACTIVE, only living/eligible attackers may hand-breach
-        // player-built fortifications. Defenders cannot repair/demolish and
-        // rebuild their wall while the assault is underway.
         if (!(event.getPlayer() instanceof ServerPlayer player)
-                || !manager.isAttacker(war, player.getUUID())
                 || !manager.isParticipant(war, player.getUUID(), true)) {
             event.setCanceled(true);
             return;
         }
 
-        // Infantry breaching intentionally yields no block/XP drops. Cancel the
-        // vanilla harvest and remove the block server-side without loot.
+        // Defenders may only reposition Create/CBC construction that they
+        // personally placed during THIS active siege.
+        if (manager.isDefender(war, player.getUUID())) {
+            if (!manager.canDefenderRepositionSiegePlacement(war, pos, player.getUUID())) {
+                event.setCanceled(true);
+                return;
+            }
+            manager.releaseCityFortification(level, pos);
+            return;
+        }
+
+        if (!manager.isAttacker(war, player.getUUID())) {
+            event.setCanceled(true);
+            return;
+        }
+
+        // Attacker infantry breaching intentionally yields no block/XP drops.
         event.setCanceled(true);
         event.setExpToDrop(0);
         if (level.destroyBlock(pos, false, player)) {
             manager.releaseCityFortification(level, pos);
-
-            // Keep the normal one-point tool wear cost even though vanilla
-            // harvesting was replaced to suppress drops.
             if (!player.isCreative() && !player.getMainHandItem().isEmpty()) {
                 player.getMainHandItem().hurtAndBreak(1, player,
                         p -> p.broadcastBreakEvent(InteractionHand.MAIN_HAND));
@@ -154,7 +165,8 @@ public final class CityProtectionEvents {
             // Treat ammunition as loading state rather than construction. Both
             // sides may load/reload during PREPARING and ACTIVE, and ammunition
             // never consumes the city's fortification budget.
-            if (CBCMunitionClassifier.isBigCannonMunition(event.getPlacedBlock().getBlock())) {
+            if (CBCMunitionClassifier.isManualLoadingPlacement(
+                    level, event.getPos(), event.getPlacedBlock().getBlock())) {
                 return;
             }
 
@@ -170,15 +182,23 @@ public final class CityProtectionEvents {
             // mechanical defenses, cannon construction, armor, loaders, etc.
             // These placements ARE fortifications and therefore consume/free the
             // same city budget as pre-war defensive construction.
-            if (!manager.isAttacker(war, player.getUUID())
+            if (manager.isDefender(war, player.getUUID())
                     && isCreateOrCbcBlock(event.getPlacedBlock())) {
+                if (manager.isInsideCityCaptureNoBuildCore(city, event.getPos())) {
+                    event.setCanceled(true);
+                    player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                            "Structural defenses cannot be placed inside the city capture core."));
+                    return;
+                }
                 if (!manager.registerCityFortificationDuringActiveSiege(level, event.getPos())) {
                     event.setCanceled(true);
                     player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
                             "Strategic city fortification budget reached: "
                                     + manager.fortificationCount(city) + "/"
                                     + manager.fortificationBudget(city) + " blocks."));
+                    return;
                 }
+                manager.recordSiegePlacement(war, event.getPos(), player.getUUID());
                 return;
             }
 
@@ -210,16 +230,12 @@ public final class CityProtectionEvents {
         event.getAffectedBlocks().removeIf(pos -> {
             StrategicCity city = manager.cityAtBlock(level.dimension().location(), pos);
             if (city == null) return false;
-
-            // Original city infrastructure is always permanent.
             if (city.isProtected(pos)) return true;
 
             WarRecord war = manager.anyWarForCity(city.id);
-
-            // PREPARING is a frozen snapshot: TNT, creepers and other explosion
-            // sources cannot alter the fortifications before the fight goes live.
-            // During ACTIVE, non-permanent fortifications are destructible.
-            return war != null && war.phase != WarPhase.ACTIVE;
+            if (war != null && war.phase != WarPhase.ACTIVE) return true;
+            if (war != null) manager.releaseCityFortification(level, pos);
+            return false;
         });
     }
 
@@ -228,6 +244,49 @@ public final class CityProtectionEvents {
         if (key == null) return false;
         String namespace = key.getNamespace();
         return "create".equals(namespace) || "createbigcannons".equals(namespace);
+    }
+
+    @SubscribeEvent
+    public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        if (!(player.level() instanceof ServerLevel level)) return;
+
+        WarManager manager = WarManager.get(level.getServer());
+
+        WarRecord playerWar = manager.activeWarForRosterPlayer(player.getUUID());
+        if (playerWar != null && !manager.isParticipant(playerWar, player.getUUID(), true)) {
+            if (isCreateOrCbcBlock(level.getBlockState(event.getPos()))) {
+                event.setCanceled(true);
+                return;
+            }
+        }
+
+        if (!WarConfig.BLOCK_FLUIDS_DURING_CITY_SIEGE.get()) return;
+        if (!(player.getItemInHand(event.getHand()).getItem() instanceof BucketItem)) return;
+        if (touchesSiegedCity(manager, level, event.getPos())) event.setCanceled(true);
+    }
+
+    @SubscribeEvent
+    public static void onFluidPlaceBlock(BlockEvent.FluidPlaceBlockEvent event) {
+        if (!WarConfig.BLOCK_FLUIDS_DURING_CITY_SIEGE.get()) return;
+        if (!(event.getLevel() instanceof ServerLevel level)) return;
+
+        WarManager manager = WarManager.get(level.getServer());
+        StrategicCity city = manager.cityAtBlock(level.dimension().location(), event.getPos());
+        if (city == null || manager.anyWarForCity(city.id) == null) return;
+        event.setNewState(event.getOriginalState());
+    }
+
+    private static boolean touchesSiegedCity(WarManager manager, ServerLevel level, BlockPos origin) {
+        StrategicCity at = manager.cityAtBlock(level.dimension().location(), origin);
+        if (at != null && manager.anyWarForCity(at.id) != null) return true;
+
+        for (var direction : net.minecraft.core.Direction.values()) {
+            StrategicCity adjacent = manager.cityAtBlock(
+                    level.dimension().location(), origin.relative(direction));
+            if (adjacent != null && manager.anyWarForCity(adjacent.id) != null) return true;
+        }
+        return false;
     }
 
     @SubscribeEvent
