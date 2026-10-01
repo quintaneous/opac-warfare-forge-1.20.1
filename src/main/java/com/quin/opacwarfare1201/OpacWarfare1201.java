@@ -5,6 +5,7 @@ import com.quin.opacwarfare1201.command.WarCommands;
 import com.quin.opacwarfare1201.compat.CBCProtectionEvents;
 import com.quin.opacwarfare1201.compat.CityProtectionEvents;
 import com.quin.opacwarfare1201.config.WarConfig;
+import com.quin.opacwarfare1201.network.WarNetwork;
 import com.quin.opacwarfare1201.opac.TerritoryClaimActionListener;
 import com.quin.opacwarfare1201.opac.WarAccessOverrider;
 import com.quin.opacwarfare1201.war.WarManager;
@@ -27,6 +28,7 @@ public final class OpacWarfare1201 {
 
     public OpacWarfare1201() {
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, WarConfig.SPEC, "opac-warfare-1201.toml");
+        WarNetwork.register();
         MinecraftForge.EVENT_BUS.register(this);
         MinecraftForge.EVENT_BUS.register(WarManager.class);
         MinecraftForge.EVENT_BUS.register(CBCProtectionEvents.class);

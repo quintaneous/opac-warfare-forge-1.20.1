@@ -315,6 +315,22 @@ public final class WarManager {
                 : OpacSides.sideName(server, city.controllerPartyId, city.controllerOwnerId);
     }
 
+    public int claimCountForParty(UUID partyId) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
+        if (party == null) return 0;
+
+        Set<UUID> members = new HashSet<>();
+        party.getMemberInfoStream().forEach(member -> members.add(member.getUUID()));
+
+        int[] count = {0};
+        OpenPACServerAPI.get(server).getServerClaimsManager().getPlayerInfoStream().forEach(info -> {
+            if (!members.contains(info.getPlayerId())) return;
+            info.getStream().forEach(entry ->
+                    entry.getValue().getStream().forEach(list -> count[0] += list.getCount()));
+        });
+        return count[0];
+    }
+
     public long remainingAttackCooldownSeconds(UUID partyId) {
         return remainingAttackCooldownSeconds(partyId, null);
     }

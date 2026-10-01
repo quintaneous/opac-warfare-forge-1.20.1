@@ -3,6 +3,8 @@ package com.quin.opacwarfare1201.command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.quin.opacwarfare1201.config.WarConfig;
+import com.quin.opacwarfare1201.network.WarNetwork;
 import com.quin.opacwarfare1201.opac.OpacSides;
 import com.quin.opacwarfare1201.war.CapitalRecord;
 import com.quin.opacwarfare1201.war.StrategicCity;
@@ -17,6 +19,8 @@ import net.minecraft.world.level.ChunkPos;
 import xaero.pac.common.server.api.OpenPACServerAPI;
 import xaero.pac.common.server.parties.party.api.IServerPartyAPI;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 public final class WarCommands {
@@ -24,6 +28,7 @@ public final class WarCommands {
 
     public static void register(CommandDispatcher<CommandSourceStack> d) {
         d.register(Commands.literal("war")
+                .then(Commands.literal("menu").executes(ctx -> menu(ctx.getSource())))
                 .then(Commands.literal("start").executes(ctx -> start(ctx.getSource())))
                 .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
                 .then(Commands.literal("cooldown").executes(ctx -> cooldown(ctx.getSource())))
@@ -70,6 +75,116 @@ public final class WarCommands {
                                         .executes(ctx -> clearCapital(ctx.getSource(), StringArgumentType.getString(ctx, "partyId")))))
                         .then(Commands.literal("list").executes(ctx -> list(ctx.getSource()))))
         );
+    }
+
+    private static int menu(CommandSourceStack src) {
+        try {
+            ServerPlayer player = src.getPlayerOrException();
+            WarManager manager = WarManager.get(src.getServer());
+            IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(player.getUUID());
+
+            List<String> lines = new ArrayList<>();
+            lines.add("H|NATION OVERVIEW");
+
+            if (party == null) {
+                lines.add("R|No OPaC party");
+                lines.add("D|Create or join a party before claiming territory.");
+                lines.add("D|Use /oparties create or join an existing party.");
+            } else {
+                UUID partyId = party.getId();
+                boolean owner = party.getOwner().getUUID().equals(player.getUUID());
+                CapitalRecord capital = manager.capital(partyId);
+                long cooldown = manager.remainingAttackCooldownSeconds(partyId, player.getUUID());
+                int claims = manager.claimCountForParty(partyId);
+                long controlledCities = manager.cities().stream()
+                        .filter(city -> city.isControlledBy(partyId))
+                        .count();
+
+                lines.add("G|" + party.getDefaultName() + (owner ? "  [Owner]" : "  [Member]"));
+                lines.add("B|Members: " + party.getMemberCount() + "   Claims: " + claims
+                        + "   Cities: " + controlledCities);
+                if (capital == null) {
+                    lines.add("Y|Capital: Not established");
+                } else {
+                    lines.add("Y|Capital: " + capital.dimension + "  [" + capital.chunkX + ", " + capital.chunkZ + "]");
+                }
+                lines.add(cooldown > 0
+                        ? "R|Attack cooldown: " + WarManager.formatCooldown(cooldown)
+                        : "G|Attack cooldown: Ready");
+
+                lines.add("");
+                lines.add("H|YOUR WARS");
+                boolean hasWar = false;
+                for (WarRecord war : manager.wars()) {
+                    boolean attacker = partyId.equals(war.attackerPartyId);
+                    boolean defender = partyId.equals(war.defenderPartyId);
+                    if (!attacker && !defender) continue;
+                    hasWar = true;
+
+                    String role = attacker ? "ATTACKING" : "DEFENDING";
+                    String target = war.isCityWar()
+                            ? "City " + war.cityId
+                            : "Chunk [" + war.chunkX + ", " + war.chunkZ + "]";
+                    int progress = (int)Math.round(war.progress * 100D);
+                    int maxLives = WarConfig.WAR_LIVES.get();
+                    String lives = maxLives <= 0
+                            ? "unlimited"
+                            : String.valueOf(war.lives.getOrDefault(player.getUUID(), maxLives));
+
+                    lines.add((attacker ? "R|" : "B|") + role + " - " + target + " - " + war.phase);
+                    lines.add("D|Control: " + progress + "% attacker   Your lives: " + lives);
+                }
+                if (!hasWar) lines.add("D|No active or preparing wars.");
+
+                lines.add("");
+                lines.add("H|YOUR STRATEGIC CITIES");
+                boolean hasCity = false;
+                for (StrategicCity city : manager.cities()) {
+                    if (!city.isControlledBy(partyId)) continue;
+                    hasCity = true;
+                    lines.add("P|" + city.id + "  [" + city.captureChunkX + ", " + city.captureChunkZ + "]");
+                    lines.add("D|Fortifications: " + manager.fortificationCount(city)
+                            + "/" + manager.fortificationBudget(city));
+                }
+                if (!hasCity) lines.add("D|Your nation controls no strategic cities.");
+            }
+
+            lines.add("");
+            lines.add("H|WORLD CAPITALS");
+            if (manager.capitals().isEmpty()) {
+                lines.add("D|No capitals have been established.");
+            } else {
+                for (CapitalRecord capital : manager.capitals()) {
+                    String name = OpacSides.sideName(src.getServer(), capital.partyId, capital.ownerId);
+                    lines.add("Y|" + name + "  [" + capital.chunkX + ", " + capital.chunkZ + "]");
+                    lines.add("D|" + capital.dimension);
+                }
+            }
+
+            lines.add("");
+            lines.add("H|STRATEGIC CITIES");
+            if (manager.cities().isEmpty()) {
+                lines.add("D|No strategic cities have been defined.");
+            } else {
+                for (StrategicCity city : manager.cities()) {
+                    lines.add("P|" + city.id + " - " + manager.cityControllerName(city));
+                    lines.add("D|Capture [" + city.captureChunkX + ", " + city.captureChunkZ + "] Y=" + city.captureY
+                            + "   Fortifications " + manager.fortificationCount(city)
+                            + "/" + manager.fortificationBudget(city));
+                }
+            }
+
+            lines.add("");
+            lines.add("H|QUICK COMMANDS");
+            lines.add("D|/war start  |  /war city attack <city>  |  /war surrender");
+            lines.add("D|/war capital set  |  /war cooldown  |  /war menu");
+
+            WarNetwork.openDashboard(player, lines);
+            return 1;
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("Could not open warfare dashboard: " + e.getMessage()));
+            return 0;
+        }
     }
 
     private static int start(CommandSourceStack src) {
