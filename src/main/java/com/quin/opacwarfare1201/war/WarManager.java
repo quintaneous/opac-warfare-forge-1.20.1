@@ -2,6 +2,7 @@ package com.quin.opacwarfare1201.war;
 
 import com.quin.opacwarfare1201.OpacWarfare1201;
 import com.quin.opacwarfare1201.config.WarConfig;
+import com.quin.opacwarfare1201.data.TerritoryKey;
 import com.quin.opacwarfare1201.data.WarSavedData;
 import com.quin.opacwarfare1201.opac.OpacSides;
 import net.minecraft.ChatFormatting;
@@ -286,15 +287,47 @@ public final class WarManager {
     }
 
     public boolean isParticipant(WarRecord war, UUID playerId, boolean requireLives) {
-        boolean member = OpacSides.isMember(server, playerId, war.attackerPartyId, war.attackerOwnerId)
-                || OpacSides.isMember(server, playerId, war.defenderPartyId, war.defenderOwnerId);
-        if (!member) return false;
+        if (!war.isParticipant(playerId)) return false;
         if (!requireLives || WarConfig.WAR_LIVES.get() <= 0) return true;
         return war.lives.getOrDefault(playerId, WarConfig.WAR_LIVES.get()) > 0;
     }
 
     public boolean isAttacker(WarRecord war, UUID playerId) {
-        return OpacSides.isMember(server, playerId, war.attackerPartyId, war.attackerOwnerId);
+        return war.isAttacker(playerId);
+    }
+
+    public boolean isDefender(WarRecord war, UUID playerId) {
+        return war.isDefender(playerId);
+    }
+
+    public boolean isCurrentPartyMember(UUID playerId, UUID partyId) {
+        IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(playerId);
+        return party != null && party.getId().equals(partyId);
+    }
+
+    @Nullable
+    public UUID territoryPartyAt(ResourceLocation dim, int x, int z) {
+        return data.territoryParty(new TerritoryKey(dim, x, z));
+    }
+
+    public boolean territoryBelongsTo(ResourceLocation dim, int x, int z, UUID partyId) {
+        return partyId.equals(territoryPartyAt(dim, x, z));
+    }
+
+    public void setTerritoryParty(ResourceLocation dim, int x, int z, UUID partyId) {
+        data.setTerritoryParty(new TerritoryKey(dim, x, z), partyId);
+    }
+
+    public void clearTerritory(ResourceLocation dim, int x, int z) {
+        data.removeTerritory(new TerritoryKey(dim, x, z));
+    }
+
+    @Nullable
+    public UUID battlefieldPartyAt(ResourceLocation dim, int x, int z) {
+        UUID territory = territoryPartyAt(dim, x, z);
+        if (territory != null) return territory;
+        StrategicCity city = cityAtChunk(dim, x, z);
+        return city == null ? null : city.controllerPartyId;
     }
 
     public String attackerName(WarRecord war) {
