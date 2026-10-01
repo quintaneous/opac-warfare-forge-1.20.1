@@ -815,6 +815,7 @@ public final class WarManager {
         capital.chunkX = cp.x;
         capital.chunkZ = cp.z;
         data.putCapital(capital);
+        rememberPartySnapshot(side.partyId());
 
         broadcast(Component.literal("CAPITAL: " + side.name() + " established its capital at chunk ["
                 + cp.x + ", " + cp.z + "].").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD));
@@ -955,10 +956,58 @@ public final class WarManager {
 
         city.controllerPartyId = party.getId();
         city.controllerOwnerId = party.getOwner().getUUID();
+        rememberPartySnapshot(party.getId());
         data.changed();
         broadcast(Component.literal("CITY CONTROL: " + city.id + " is now controlled by " + party.getDefaultName() + ".")
                 .withStyle(ChatFormatting.LIGHT_PURPLE));
         return CityResult.ok(city, city.protectedBlocks.size());
+    }
+
+    public CityResult setCityProtectionAround(ServerPlayer admin, String cityId, int radiusBlocks, boolean permanent) {
+        StrategicCity city = data.getCity(cityId);
+        if (city == null) return CityResult.fail("Unknown strategic city: " + cityId + ".");
+        if (anyWarForCity(city.id) != null) {
+            return CityResult.fail("City protection cannot be edited during a siege.");
+        }
+        if (!admin.level().dimension().location().equals(city.dimension)) {
+            return CityResult.fail("You must be in the same dimension as the strategic city.");
+        }
+        if (radiusBlocks < 1 || radiusBlocks > 64) {
+            return CityResult.fail("Protection edit radius must be 1-64 blocks.");
+        }
+
+        ServerLevel level = level(city.dimension);
+        if (level == null) return CityResult.fail("Could not access city dimension.");
+
+        BlockPos center = admin.blockPosition();
+        int changed = 0;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+
+        for (int x = center.getX() - radiusBlocks; x <= center.getX() + radiusBlocks; x++) {
+            for (int y = Math.max(level.getMinBuildHeight(), center.getY() - radiusBlocks);
+                 y <= Math.min(level.getMaxBuildHeight() - 1, center.getY() + radiusBlocks); y++) {
+                for (int z = center.getZ() - radiusBlocks; z <= center.getZ() + radiusBlocks; z++) {
+                    pos.set(x, y, z);
+                    if (!city.containsBlock(city.dimension, pos)) continue;
+
+                    if (permanent) {
+                        BlockState state = level.getBlockState(pos);
+                        if (!state.isAir() && state.getFluidState().isEmpty() && city.protectedBlocks.add(pos)) {
+                            city.fortificationBlocks.remove(pos.asLong());
+                            changed++;
+                        }
+                    } else if (city.protectedBlocks.remove(pos)) {
+                        changed++;
+                    }
+                }
+            }
+        }
+
+        if (changed > 0) data.changed();
+        return new CityResult(true,
+                (permanent ? "Marked " : "Made breachable ") + changed + " city block(s).",
+                city,
+                city.protectedBlocks.size());
     }
 
     @Nullable
@@ -1242,8 +1291,11 @@ public final class WarManager {
     }
 
     public void surrender(ServerPlayer player, WarRecord war) {
-        if (isAttacker(war, player.getUUID())) finish(war, false);
-        else if (OpacSides.isMember(server, player.getUUID(), war.defenderPartyId, war.defenderOwnerId)) finish(war, true);
+        IServerPartyAPI currentParty = OpenPACServerAPI.get(server).getPartyManager().getPartyByMember(player.getUUID());
+        if (currentParty == null || !currentParty.getOwner().getUUID().equals(player.getUUID())) return;
+
+        if (currentParty.getId().equals(war.attackerPartyId)) finish(war, false);
+        else if (war.defenderPartyId != null && currentParty.getId().equals(war.defenderPartyId)) finish(war, true);
     }
 
     private void handlePreparationActivation(WarRecord war, ServerLevel level) {
@@ -1596,6 +1648,9 @@ public final class WarManager {
                 war.chunkX,
                 war.chunkZ,
                 war.originalForceload);
+        if (war.defenderPartyId != null) {
+            setTerritoryParty(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId);
+        }
     }
 
     private void tickSecond() {
