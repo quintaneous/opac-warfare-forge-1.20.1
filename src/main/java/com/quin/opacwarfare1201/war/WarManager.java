@@ -1409,12 +1409,26 @@ public final class WarManager {
     private void collapseNation(UUID partyId, @Nullable UUID ownerId) {
         String name = OpacSides.sideName(server, partyId, ownerId);
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
-        OpacSides.Side losingSide = new OpacSides.Side(partyId, ownerId == null ? partyId : ownerId, name);
 
-        List<ClaimLocation> ownedClaims = collectClaimsForSide(claims, losingSide);
-        for (ClaimLocation location : ownedClaims) {
-            claims.unclaim(location.dimension, location.x, location.z);
+        // End every other battle involving the collapsed nation before wiping
+        // its territory. Targets the collapsed nation was attacking are restored;
+        // contested chunks it was defending are simply abandoned with the rest
+        // of the collapsed territory.
+        for (WarRecord other : new ArrayList<>(data.wars())) {
+            boolean losingAttacker = partyId.equals(other.attackerPartyId);
+            boolean losingDefender = partyId.equals(other.defenderPartyId);
+            if (!losingAttacker && !losingDefender) continue;
+
+            if (losingAttacker) {
+                applyFailedAttackCooldown(other);
+                if (!other.isCityWar() && other.phase == WarPhase.ACTIVE) restoreOriginalClaim(other);
+            } else if (!other.isCityWar() && other.phase == WarPhase.ACTIVE) {
+                claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
+            }
+            data.remove(other.id);
         }
+
+        int removedClaims = removeNationTerritory(partyId);
 
         for (StrategicCity city : data.cities()) {
             if (partyId.equals(city.controllerPartyId)) {
@@ -1423,36 +1437,35 @@ public final class WarManager {
             }
         }
 
-        List<WarRecord> otherWars = new ArrayList<>(data.wars());
-        for (WarRecord other : otherWars) {
-            boolean losingAttacker = partyId.equals(other.attackerPartyId);
-            boolean losingDefender = partyId.equals(other.defenderPartyId);
-            if (!losingAttacker && !losingDefender) continue;
-
-            if (!other.isCityWar()) {
-                if (losingAttacker && other.phase == WarPhase.ACTIVE) {
-                    restoreOriginalClaim(other);
-                } else if (losingDefender && other.phase == WarPhase.ACTIVE) {
-                    claims.unclaim(other.dimension, other.chunkX, other.chunkZ);
-                }
-            }
-            data.remove(other.id);
-        }
-
         data.removeCapital(partyId);
         data.changed();
 
         broadcast(Component.literal("CAPITAL FALLEN: " + name
-                + " lost its capital. All remaining national claims were removed and its strategic cities became neutral.")
+                + " lost its capital. " + removedClaims
+                + " remaining national claim(s) were removed and its strategic cities became neutral.")
                 .withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD));
     }
 
-    /**
-     * Removes warfare state that references OPaC parties which no longer exist.
-     * This is intentionally checked on startup, once per second, and before
-     * capital/city listings so disbanding a party cannot leave ghost capitals,
-     * city controllers, or wars behind.
-     */
+    private int removeNationTerritory(UUID partyId) {
+        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
+        List<TerritoryKey> doomed = new ArrayList<>();
+        for (Map.Entry<TerritoryKey, UUID> entry : data.territoryOwners().entrySet()) {
+            if (partyId.equals(entry.getValue())) doomed.add(entry.getKey());
+        }
+
+        for (TerritoryKey key : doomed) {
+            IPlayerChunkClaimAPI claim = claims.get(key.dimension(), key.chunkX(), key.chunkZ());
+            if (claim != null) {
+                // Nation territory never intentionally points at strategic-city
+                // SERVER claims. If a normal ACTIVE war still owns the physical
+                // chunk as SERVER, unclaiming is still the correct collapse result.
+                claims.unclaim(key.dimension(), key.chunkX(), key.chunkZ());
+            }
+            data.removeTerritory(key);
+        }
+        return doomed.size();
+    }
+
     private void rememberPartySnapshot(UUID partyId) {
         IServerPartyAPI party = OpenPACServerAPI.get(server).getPartyManager().getPartyById(partyId);
         if (party == null) return;
@@ -1462,14 +1475,13 @@ public final class WarManager {
     }
 
     /**
-     * Keeps warfare state synchronized with OPaC party lifecycle.
-     * A member leaving/kicked from an existing party does NOT remove claims.
-     * Destroying the party itself DOES remove every claim owned by members who
-     * still belonged to that party in the last live roster snapshot.
+     * Keeps the nation registry synchronized with OPaC party lifecycle.
+     * Leaving/kicking a member never transfers or removes nation territory.
+     * Destroying the party resolves its live wars as surrender and then wipes
+     * all remaining territory registered to that nation.
      */
     private void reconcilePartyState() {
         var partyManager = OpenPACServerAPI.get(server).getPartyManager();
-        IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         boolean changed = false;
 
         Map<UUID, Set<UUID>> liveRosters = new LinkedHashMap<>();
@@ -1479,20 +1491,22 @@ public final class WarManager {
             liveRosters.put(party.getId(), members);
         });
 
-        // Detect parties that existed in the prior snapshot but no longer exist.
-        // This corresponds to party destruction/admin removal, not a single
-        // member leaving an otherwise-live party.
         for (Map.Entry<UUID, Set<UUID>> snapshot :
                 new ArrayList<>(data.partyMemberSnapshots().entrySet())) {
             UUID destroyedPartyId = snapshot.getKey();
             if (liveRosters.containsKey(destroyedPartyId)) continue;
 
-            Set<UUID> formerMembers = new LinkedHashSet<>(snapshot.getValue());
-            List<ClaimLocation> doomedClaims = collectClaimsForOwners(claims, formerMembers);
-            for (ClaimLocation location : doomedClaims) {
-                claims.unclaim(location.dimension, location.x, location.z);
+            // Party destruction is surrender, not a way to delete the contested
+            // objective before the opponent can receive it.
+            for (WarRecord war : new ArrayList<>(data.wars())) {
+                if (destroyedPartyId.equals(war.attackerPartyId)) {
+                    finish(war, false);
+                } else if (destroyedPartyId.equals(war.defenderPartyId)) {
+                    finish(war, true);
+                }
             }
 
+            int removedClaims = removeNationTerritory(destroyedPartyId);
             data.removeCapital(destroyedPartyId);
             data.clearAttackCooldown(destroyedPartyId);
 
@@ -1507,41 +1521,35 @@ public final class WarManager {
             changed = true;
 
             broadcast(Component.literal("NATION DISBANDED: party " + destroyedPartyId
-                    + " was destroyed. Its " + doomedClaims.size()
-                    + " remaining claim(s) were removed, its capital was cleared, and its strategic cities became Neutral.")
+                    + " was destroyed. Its live wars were resolved as surrender, "
+                    + removedClaims + " remaining claim(s) were removed, its capital was cleared, "
+                    + "and its remaining strategic cities became Neutral.")
                     .withStyle(ChatFormatting.DARK_RED));
         }
 
-        // Refresh the roster for every party that still exists. A member who
-        // simply leaves is therefore removed from this snapshot while all
-        // physical claims remain untouched.
         for (Map.Entry<UUID, Set<UUID>> live : liveRosters.entrySet()) {
             data.setPartyMemberSnapshot(live.getKey(), live.getValue());
         }
 
-        // A capital is valid only while the party exists AND the recorded chunk
-        // is still actually owned by that party.
+        // Capital validity is based on the nation registry, not on the original
+        // OPaC claim owner's current party. A capital under ACTIVE attack is
+        // physically SERVER-owned but remains registered to its defender until
+        // the battle resolves.
         for (CapitalRecord capital : new ArrayList<>(data.capitals())) {
             IServerPartyAPI party = partyManager.getPartyById(capital.partyId);
-            boolean valid = party != null;
+            boolean valid = party != null
+                    && territoryBelongsTo(capital.dimension, capital.chunkX, capital.chunkZ, capital.partyId);
 
-            if (valid) {
-                IPlayerChunkClaimAPI claim = claims.get(capital.dimension, capital.chunkX, capital.chunkZ);
-                valid = claim != null
-                        && !SpecialClaimOwners.SERVER.equals(claim.getPlayerId())
-                        && OpacSides.isMember(server, claim.getPlayerId(), capital.partyId, party.getOwner().getUUID());
-
-                if (valid && !Objects.equals(capital.ownerId, party.getOwner().getUUID())) {
-                    capital.ownerId = party.getOwner().getUUID();
-                    changed = true;
-                }
+            if (valid && !Objects.equals(capital.ownerId, party.getOwner().getUUID())) {
+                capital.ownerId = party.getOwner().getUUID();
+                changed = true;
             }
 
             if (!valid) {
                 data.removeCapital(capital.partyId);
                 changed = true;
                 OpacWarfare1201.LOGGER.info(
-                        "Removed orphaned capital for missing/invalid party {} at {} [{}, {}]",
+                        "Removed invalid capital for party {} at {} [{}, {}]",
                         capital.partyId, capital.dimension, capital.chunkX, capital.chunkZ);
             }
         }
@@ -1551,9 +1559,6 @@ public final class WarManager {
 
             IServerPartyAPI party = partyManager.getPartyById(city.controllerPartyId);
             if (party == null) {
-                OpacWarfare1201.LOGGER.info(
-                        "Strategic city {} became Neutral because controller party {} no longer exists",
-                        city.id, city.controllerPartyId);
                 city.controllerPartyId = null;
                 city.controllerOwnerId = null;
                 changed = true;
@@ -1563,60 +1568,23 @@ public final class WarManager {
             }
         }
 
+        // Safety net for old/corrupt saves where a party vanished without ever
+        // being present in our roster snapshot.
         for (WarRecord war : new ArrayList<>(data.wars())) {
-            boolean attackerMissing = war.attackerPartyId == null
-                    || partyManager.getPartyById(war.attackerPartyId) == null;
+            boolean attackerMissing = partyManager.getPartyById(war.attackerPartyId) == null;
             boolean defenderMissing = war.defenderPartyId != null
                     && partyManager.getPartyById(war.defenderPartyId) == null;
 
-            if (!attackerMissing && !defenderMissing) continue;
-
-            if (!war.isCityWar() && war.phase == WarPhase.ACTIVE) {
-                if (attackerMissing && !defenderMissing) {
-                    restoreOriginalClaim(war);
-                } else {
-                    // The defender party no longer exists, so do not resurrect
-                    // one of its claims while cleaning the contested chunk.
-                    claims.unclaim(war.dimension, war.chunkX, war.chunkZ);
-                }
+            if (attackerMissing) {
+                finish(war, false);
+                changed = true;
+            } else if (defenderMissing) {
+                finish(war, true);
+                changed = true;
             }
-
-            data.remove(war.id);
-            changed = true;
-            OpacWarfare1201.LOGGER.info(
-                    "Stopped war {} because an involved OPaC party no longer exists",
-                    war.id);
         }
 
         if (changed) data.changed();
-    }
-
-    private List<ClaimLocation> collectClaimsForOwners(IServerClaimsManagerAPI claims, Set<UUID> owners) {
-        List<ClaimLocation> result = new ArrayList<>();
-        if (owners.isEmpty()) return result;
-
-        claims.getPlayerInfoStream().forEach(info -> {
-            if (!owners.contains(info.getPlayerId())) return;
-            info.getStream().forEach(entry -> {
-                ResourceLocation dim = entry.getKey();
-                entry.getValue().getStream().forEach(list ->
-                        list.getStream().forEach(cp -> result.add(new ClaimLocation(dim, cp.x, cp.z))));
-            });
-        });
-        return result;
-    }
-
-    private List<ClaimLocation> collectClaimsForSide(IServerClaimsManagerAPI claims, OpacSides.Side side) {
-        List<ClaimLocation> result = new ArrayList<>();
-        claims.getPlayerInfoStream().forEach(info -> {
-            if (!OpacSides.isMember(server, info.getPlayerId(), side.partyId(), side.ownerId())) return;
-            info.getStream().forEach(entry -> {
-                ResourceLocation dim = entry.getKey();
-                entry.getValue().getStream().forEach(list ->
-                        list.getStream().forEach(cp -> result.add(new ClaimLocation(dim, cp.x, cp.z))));
-            });
-        });
-        return result;
     }
 
     private void restoreOriginalClaim(WarRecord war) {
