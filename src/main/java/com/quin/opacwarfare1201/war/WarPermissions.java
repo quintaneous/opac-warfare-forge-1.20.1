@@ -19,6 +19,7 @@ import java.util.UUID;
 public final class WarPermissions {
     private static final String CBC_LAUNCH_PARTY_TAG = "opacWarfareLaunchParty";
     private static final ThreadLocal<UUID> CBC_SOURCE_PARTY = new ThreadLocal<>();
+    private static final ThreadLocal<Entity> CREATE_SOURCE = new ThreadLocal<>();
 
     private WarPermissions() {}
 
@@ -84,6 +85,36 @@ public final class WarPermissions {
         return sourceParty != null
                 && (sourceParty.equals(war.attackerPartyId)
                 || sourceParty.equals(war.defenderPartyId));
+    }
+
+    public static void enterCreateContraption(Entity contraption) {
+        CREATE_SOURCE.set(contraption);
+    }
+
+    public static void exitCreateContraption() {
+        CREATE_SOURCE.remove();
+    }
+
+    public static boolean canCreateBreakBlock(Level level, BlockPos pos) {
+        if (!(level instanceof ServerLevel serverLevel)) return true;
+
+        WarManager manager = WarManager.get(serverLevel.getServer());
+        StrategicCity city = manager.cityAtBlock(level.dimension().location(), pos);
+        if (city == null) return true;
+
+        // Permanent infrastructure is machine-proof at all times.
+        if (city.isProtected(pos)) return false;
+
+        WarRecord war = manager.anyWarForCity(city.id);
+        if (war == null) return true;
+        if (war.phase != WarPhase.ACTIVE) return false;
+
+        Entity source = CREATE_SOURCE.get();
+        if (source == null || !canCreateContraptionActors(source)) return false;
+
+        // Defender drills/rollers/plough breakers may only remove construction
+        // created during this active siege. Pre-war fortifications remain frozen.
+        return manager.isCurrentSiegePlacement(war, pos);
     }
 
     public static boolean canUseCreateContraption(Entity contraption, Player player) {
