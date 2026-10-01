@@ -733,10 +733,10 @@ public final class WarManager {
     }
 
     private boolean neighborAccessible(IServerClaimsManagerAPI claims, ResourceLocation dim, int x, int z, OpacSides.Side attacker) {
-        IPlayerChunkClaimAPI c = claims.get(dim, x, z);
-        if (c == null) return true;
-        if (SpecialClaimOwners.SERVER.equals(c.getPlayerId())) return false;
-        return OpacSides.sameSide(attacker, OpacSides.claimSide(server, c));
+        IPlayerChunkClaimAPI claim = claims.get(dim, x, z);
+        if (claim == null) return true;
+        if (SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) return false;
+        return attacker.partyId() != null && attacker.partyId().equals(territoryPartyAt(dim, x, z));
     }
 
     private void setCapturePoint(WarRecord war, ServerLevel level) {
@@ -805,8 +805,8 @@ public final class WarManager {
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         IPlayerChunkClaimAPI claim = claims.get(dim, cp.x, cp.z);
         if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())
-                || !OpacSides.sameSide(side, OpacSides.claimSide(server, claim))) {
-            return CapitalResult.fail("Stand inside a chunk owned by your party to establish the capital.");
+                || !territoryBelongsTo(dim, cp.x, cp.z, side.partyId())) {
+            return CapitalResult.fail("Stand inside nation territory registered to your party to establish the capital.");
         }
 
         CapitalRecord capital = new CapitalRecord(side.partyId());
@@ -970,11 +970,28 @@ public final class WarManager {
         }
         rememberPartySnapshot(side.partyId());
 
+        WarRecord frozenWar = anyWarAt(dim, x, z);
+        if (frozenWar != null && !frozenWar.isCityWar()) {
+            return "That claim is frozen while its war is PREPARING or ACTIVE.";
+        }
+
+        IPlayerChunkClaimAPI current = claims.get(dim, x, z);
+        UUID registeredParty = territoryPartyAt(dim, x, z);
+
+        if (action != ClaimingAction.CLAIM && current != null
+                && !SpecialClaimOwners.SERVER.equals(current.getPlayerId())) {
+            if (registeredParty == null) {
+                return "That claim has no nation ownership record. Ask an admin to reconcile territory before modifying it.";
+            }
+            if (!side.partyId().equals(registeredParty)) {
+                return "That chunk belongs to another nation. Leaving or changing parties does not transfer existing territory.";
+            }
+        }
+
         if (action == ClaimingAction.CLAIM && WarConfig.REQUIRE_CONTIGUOUS_CLAIMS.get()) {
-            IPlayerChunkClaimAPI current = claims.get(dim, x, z);
             if (current != null) return null;
 
-            boolean anyClaims = sideHasAnyClaimInDimension(claims, side, dim);
+            boolean anyClaims = sideHasAnyClaimInDimension(side, dim);
             boolean hasAnchor = hasValidAnchorInDimension(side, dim);
 
             if (!anyClaims && !hasAnchor) return null;
@@ -988,13 +1005,8 @@ public final class WarManager {
             return "New claims must touch territory connected to your capital or a controlled strategic city on a north/south/east/west side.";
         }
 
-        if (action == ClaimingAction.UNCLAIM) {
-            IPlayerChunkClaimAPI current = claims.get(dim, x, z);
-            if (current == null || SpecialClaimOwners.SERVER.equals(current.getPlayerId())
-                    || !OpacSides.sameSide(side, OpacSides.claimSide(server, current))) {
-                return null;
-            }
-
+        if (action == ClaimingAction.UNCLAIM && registeredParty != null
+                && side.partyId().equals(registeredParty)) {
             CapitalRecord capital = data.getCapital(side.partyId());
             if (capital != null && capital.targets(dim, x, z)) {
                 return "Your capital chunk cannot be unclaimed. An admin must clear or relocate the capital first.";
@@ -1009,6 +1021,19 @@ public final class WarManager {
         return null;
     }
 
+    public void handleSuccessfulClaimAction(UUID playerId, ResourceLocation dim, int x, int z,
+                                            ClaimingAction action) {
+        if (action == ClaimingAction.CLAIM) {
+            OpacSides.Side side = OpacSides.playerSide(server, playerId);
+            if (side != null && side.partyId() != null) {
+                setTerritoryParty(dim, x, z, side.partyId());
+                rememberPartySnapshot(side.partyId());
+            }
+        } else if (action == ClaimingAction.UNCLAIM) {
+            clearTerritory(dim, x, z);
+        }
+    }
+
     private boolean hasValidAnchorInDimension(OpacSides.Side side, ResourceLocation dim) {
         CapitalRecord capital = side.partyId() == null ? null : data.getCapital(side.partyId());
         if (capital != null && capital.dimension.equals(dim)) return true;
@@ -1018,20 +1043,20 @@ public final class WarManager {
         return false;
     }
 
-    private boolean sideHasAnyClaimInDimension(IServerClaimsManagerAPI claims, OpacSides.Side side, ResourceLocation dim) {
-        return claims.getPlayerInfoStream().anyMatch(info -> {
-            if (!OpacSides.isMember(server, info.getPlayerId(), side.partyId(), side.ownerId())) return false;
-            var dimensionClaims = info.getDimension(dim);
-            if (dimensionClaims == null) return false;
-            return dimensionClaims.getStream().anyMatch(list -> list.getCount() > 0);
-        });
+    private boolean sideHasAnyClaimInDimension(OpacSides.Side side, ResourceLocation dim) {
+        if (side.partyId() == null) return false;
+        for (Map.Entry<TerritoryKey, UUID> entry : data.territoryOwners().entrySet()) {
+            if (entry.getKey().dimension().equals(dim) && side.partyId().equals(entry.getValue())) return true;
+        }
+        return false;
     }
 
     private boolean isFriendlyClaim(IServerClaimsManagerAPI claims, OpacSides.Side side,
                                     ResourceLocation dim, int x, int z) {
+        if (side.partyId() == null) return false;
         IPlayerChunkClaimAPI claim = claims.get(dim, x, z);
         if (claim == null || SpecialClaimOwners.SERVER.equals(claim.getPlayerId())) return false;
-        return OpacSides.sameSide(side, OpacSides.claimSide(server, claim));
+        return side.partyId().equals(territoryPartyAt(dim, x, z));
     }
 
     private boolean touchesControlledCity(OpacSides.Side side, ResourceLocation dim, int x, int z) {
