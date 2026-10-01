@@ -309,6 +309,42 @@ public final class WarManager {
                 : OpacSides.sideName(server, city.controllerPartyId, city.controllerOwnerId);
     }
 
+    public long remainingAttackCooldownSeconds(UUID partyId) {
+        long until = data.attackCooldownUntil(partyId);
+        if (until <= 0L) return 0L;
+
+        long remainingMillis = until - System.currentTimeMillis();
+        if (remainingMillis <= 0L) {
+            data.clearAttackCooldown(partyId);
+            return 0L;
+        }
+        return (remainingMillis + 999L) / 1000L;
+    }
+
+    private void applyFailedAttackCooldown(WarRecord war) {
+        int minutes = WarConfig.FAILED_ATTACK_COOLDOWN_MINUTES.get();
+        if (minutes <= 0 || war.attackerPartyId == null) return;
+
+        long until = System.currentTimeMillis() + minutes * 60_000L;
+        data.setAttackCooldownUntil(war.attackerPartyId, until);
+
+        broadcast(Component.literal("ATTACK COOLDOWN: " + attackerName(war)
+                + " failed to capture its target and cannot start another offensive war for "
+                + formatCooldown(minutes * 60L) + ".")
+                .withStyle(ChatFormatting.YELLOW));
+    }
+
+    public static String formatCooldown(long totalSeconds) {
+        long seconds = Math.max(0L, totalSeconds);
+        long hours = seconds / 3600L;
+        long minutes = (seconds % 3600L) / 60L;
+        long secs = seconds % 60L;
+
+        if (hours > 0L) return hours + "h " + minutes + "m";
+        if (minutes > 0L) return minutes + "m " + secs + "s";
+        return secs + "s";
+    }
+
     public StartResult startWar(ServerPlayer attacker, ChunkPos target) {
         ResourceLocation dim = attacker.level().dimension().location();
         if (anyWarAt(dim, target.x, target.z) != null) {
@@ -450,6 +486,12 @@ public final class WarManager {
     private String validateAttackerCanStartWar(OpacSides.Side attackerSide) {
         if (attackerSide.partyId() == null || data.getCapital(attackerSide.partyId()) == null) {
             return "Your nation must set a capital with /war capital set before starting a war.";
+        }
+
+        long cooldownSeconds = remainingAttackCooldownSeconds(attackerSide.partyId());
+        if (cooldownSeconds > 0L) {
+            return "Your nation is on an offensive-war cooldown after a failed attack. Time remaining: "
+                    + formatCooldown(cooldownSeconds) + ".";
         }
 
         if (WarConfig.ONLY_ONE_OFFENSIVE_WAR_PER_SIDE.get()) {
@@ -1022,6 +1064,7 @@ public final class WarManager {
                         + " from " + previous + ". The city is now a territorial anchor for " + attackerName(war) + ".")
                         .withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD));
             } else {
+                applyFailedAttackCooldown(war);
                 data.remove(war.id);
                 broadcast(Component.literal("CITY DEFENDED: " + city.id + " remains controlled by " + cityControllerName(city) + ".")
                         .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
@@ -1044,6 +1087,7 @@ public final class WarManager {
                 && war.defenderPartyId != null
                 && isCapitalChunk(war.defenderPartyId, war.dimension, war.chunkX, war.chunkZ);
 
+        if (!attackerWon) applyFailedAttackCooldown(war);
         data.remove(war.id);
 
         broadcast(Component.literal(attackerWon
