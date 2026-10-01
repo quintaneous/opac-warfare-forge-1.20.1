@@ -32,7 +32,12 @@ public final class WarCommands {
                 .then(Commands.literal("start").executes(ctx -> start(ctx.getSource())))
                 .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
                 .then(Commands.literal("cooldown").executes(ctx -> cooldown(ctx.getSource())))
-                .then(Commands.literal("surrender").executes(ctx -> surrender(ctx.getSource())))
+                .then(Commands.literal("surrender")
+                        .executes(ctx -> surrender(ctx.getSource(), null))
+                        .then(Commands.argument("warId", StringArgumentType.word())
+                                .executes(ctx -> surrender(
+                                        ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "warId")))))
                 .then(Commands.literal("capital")
                         .then(Commands.literal("set").executes(ctx -> setCapital(ctx.getSource())))
                         .then(Commands.literal("status").executes(ctx -> capitalStatus(ctx.getSource()))))
@@ -162,6 +167,7 @@ public final class WarCommands {
                     lines.add((attacker ? "R|" : "B|") + role + " - " + target + " - " + war.phase);
                     lines.add("D|Control: " + progress + "% attacker   Your lives: " + lives + timer);
                     lines.add("D|Frozen rosters: A=" + war.attackerRoster.size() + " D=" + war.defenderRoster.size());
+                    lines.add("D|War ID: " + war.id);
                 }
                 if (!hasWar) lines.add("D|No active or preparing wars.");
 
@@ -508,30 +514,58 @@ public final class WarCommands {
         }
     }
 
-    private static int surrender(CommandSourceStack src) {
+    private static int surrender(CommandSourceStack src, String rawWarId) {
         try {
-            ServerPlayer p = src.getPlayerOrException();
-            IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(p.getUUID());
+            ServerPlayer player = src.getPlayerOrException();
+            IServerPartyAPI party = OpenPACServerAPI.get(src.getServer()).getPartyManager().getPartyByMember(player.getUUID());
             if (party == null) {
                 src.sendFailure(Component.literal("You are not in an OPaC party."));
                 return 0;
             }
-            if (!party.getOwner().getUUID().equals(p.getUUID())) {
+            if (!party.getOwner().getUUID().equals(player.getUUID())) {
                 src.sendFailure(Component.literal("Only the party owner can surrender."));
                 return 0;
             }
 
-            WarManager m = WarManager.get(src.getServer());
-            for (WarRecord w : m.wars()) {
-                if (party.getId().equals(w.attackerPartyId)
-                        || party.getId().equals(w.defenderPartyId)) {
-                    m.surrender(p, w);
-                    return 1;
+            WarManager manager = WarManager.get(src.getServer());
+            List<WarRecord> nationWars = manager.wars().stream()
+                    .filter(war -> party.getId().equals(war.attackerPartyId)
+                            || party.getId().equals(war.defenderPartyId))
+                    .toList();
+
+            if (rawWarId == null) {
+                if (nationWars.isEmpty()) {
+                    src.sendFailure(Component.literal("Your nation is not in a war."));
+                    return 0;
                 }
+                if (nationWars.size() > 1) {
+                    src.sendFailure(Component.literal(
+                            "Your nation is in multiple wars. Use /war surrender <warId>; IDs are shown in /war menu."));
+                    return 0;
+                }
+                manager.surrender(player, nationWars.get(0));
+                return 1;
             }
 
-            src.sendFailure(Component.literal("Your nation is not in a war."));
-            return 0;
+            UUID warId;
+            try {
+                warId = UUID.fromString(rawWarId);
+            } catch (IllegalArgumentException e) {
+                src.sendFailure(Component.literal("Invalid war ID."));
+                return 0;
+            }
+
+            WarRecord selected = nationWars.stream()
+                    .filter(war -> war.id.equals(warId))
+                    .findFirst()
+                    .orElse(null);
+            if (selected == null) {
+                src.sendFailure(Component.literal("That war does not involve your nation."));
+                return 0;
+            }
+
+            manager.surrender(player, selected);
+            return 1;
         } catch (Exception e) {
             src.sendFailure(Component.literal("Surrender failed: " + e.getMessage()));
             return 0;
