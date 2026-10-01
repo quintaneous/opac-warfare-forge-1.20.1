@@ -1430,9 +1430,12 @@ public final class WarManager {
 
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         IPlayerChunkClaimAPI current = claims.get(war.dimension, war.chunkX, war.chunkZ);
-        if (current == null || war.originalClaimOwner == null || !current.getPlayerId().equals(war.originalClaimOwner)) {
+        if (current == null
+                || SpecialClaimOwners.SERVER.equals(current.getPlayerId())
+                || war.defenderPartyId == null
+                || !territoryBelongsTo(war.dimension, war.chunkX, war.chunkZ, war.defenderPartyId)) {
             data.remove(war.id);
-            broadcast(Component.literal("WAR: battle cancelled because target ownership changed before activation.")
+            broadcast(Component.literal("WAR: battle cancelled because the target is no longer registered to the defending nation.")
                     .withStyle(ChatFormatting.RED));
             return;
         }
@@ -1482,7 +1485,9 @@ public final class WarManager {
         IServerClaimsManagerAPI claims = OpenPACServerAPI.get(server).getServerClaimsManager();
         UUID newOwner = attackerWon
                 ? currentPartyOwnerOr(war.attackerPartyId, war.attackerOwnerId)
-                : war.originalClaimOwner;
+                : (war.defenderPartyId == null
+                    ? war.originalClaimOwner
+                    : currentPartyOwnerOr(war.defenderPartyId, war.originalClaimOwner));
         if (newOwner == null) {
             data.remove(war.id);
             return;
@@ -1734,10 +1739,14 @@ public final class WarManager {
     }
 
     private void restoreOriginalClaim(WarRecord war) {
-        if (war.originalClaimOwner == null) return;
+        UUID owner = war.defenderPartyId == null
+                ? war.originalClaimOwner
+                : currentPartyOwnerOr(war.defenderPartyId, war.originalClaimOwner);
+        if (owner == null) return;
+
         OpenPACServerAPI.get(server).getServerClaimsManager().claim(
                 war.dimension,
-                war.originalClaimOwner,
+                owner,
                 war.originalSubConfig,
                 war.chunkX,
                 war.chunkZ,
