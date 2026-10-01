@@ -7,6 +7,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import xaero.pac.common.claims.player.api.IPlayerChunkClaimAPI;
@@ -83,6 +84,66 @@ public final class WarPermissions {
         return sourceParty != null
                 && (sourceParty.equals(war.attackerPartyId)
                 || sourceParty.equals(war.defenderPartyId));
+    }
+
+    public static boolean canUseCreateContraption(Entity contraption, Player player) {
+        if (!(contraption.level() instanceof ServerLevel level)) return true;
+
+        WarManager manager = WarManager.get(level.getServer());
+        WarRecord war = cityWarIntersecting(manager, level, contraption);
+        if (war == null) return true;
+        if (war.phase != WarPhase.ACTIVE) return false;
+
+        return manager.isParticipant(war, player.getUUID(), true);
+    }
+
+    public static boolean canCreateContraptionActors(Entity contraption) {
+        if (!(contraption.level() instanceof ServerLevel level)) return true;
+
+        WarManager manager = WarManager.get(level.getServer());
+        WarRecord war = cityWarIntersecting(manager, level, contraption);
+        if (war == null) return true;
+        if (war.phase != WarPhase.ACTIVE) return false;
+
+        StrategicCity city = manager.city(war.cityId);
+        if (city == null || war.defenderPartyId == null) return false;
+
+        BlockPos origin = createPlacementOrigin(contraption);
+        if (origin == null || !city.containsBlock(city.dimension, origin)) return false;
+
+        UUID originParty = manager.battlefieldPartyAt(
+                city.dimension, origin.getX() >> 4, origin.getZ() >> 4);
+        return war.defenderPartyId.equals(originParty);
+    }
+
+    public static boolean canCreateContraptionDisassemble(Entity contraption) {
+        return canCreateContraptionActors(contraption);
+    }
+
+    @Nullable
+    private static WarRecord cityWarIntersecting(WarManager manager, ServerLevel level, Entity entity) {
+        int minChunkX = ((int)Math.floor(entity.getBoundingBox().minX)) >> 4;
+        int maxChunkX = ((int)Math.floor(entity.getBoundingBox().maxX)) >> 4;
+        int minChunkZ = ((int)Math.floor(entity.getBoundingBox().minZ)) >> 4;
+        int maxChunkZ = ((int)Math.floor(entity.getBoundingBox().maxZ)) >> 4;
+
+        for (int x = minChunkX; x <= maxChunkX; x++) {
+            for (int z = minChunkZ; z <= maxChunkZ; z++) {
+                StrategicCity city = manager.cityAtChunk(level.dimension().location(), x, z);
+                if (city == null) continue;
+                WarRecord war = manager.anyWarForCity(city.id);
+                if (war != null) return war;
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static BlockPos createPlacementOrigin(Entity entity) {
+        CompoundTag data = entity.getPersistentData();
+        if (!data.contains("xaero_OPAC_placementPos", net.minecraft.nbt.Tag.TAG_COMPOUND)) return null;
+        CompoundTag pos = data.getCompound("xaero_OPAC_placementPos");
+        return new BlockPos(pos.getInt("x"), pos.getInt("y"), pos.getInt("z"));
     }
 
     public static ResourceLocation dimension(Level level) {
