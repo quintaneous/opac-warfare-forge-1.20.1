@@ -20,6 +20,7 @@ public final class WarSavedData extends SavedData {
     private final Map<UUID, CapitalRecord> capitals = new LinkedHashMap<>();
     private final Map<String, StrategicCity> cities = new LinkedHashMap<>();
     private final Map<UUID, Long> attackCooldownUntilEpochMillis = new LinkedHashMap<>();
+    private final Map<UUID, Long> playerAttackCooldownUntilEpochMillis = new LinkedHashMap<>();
 
     public Collection<WarRecord> wars() { return wars.values(); }
     public WarRecord get(UUID id) { return wars.get(id); }
@@ -82,6 +83,20 @@ public final class WarSavedData extends SavedData {
         if (attackCooldownUntilEpochMillis.remove(partyId) != null) setDirty();
     }
 
+    public long playerAttackCooldownUntil(UUID playerId) {
+        return playerAttackCooldownUntilEpochMillis.getOrDefault(playerId, 0L);
+    }
+
+    public void setPlayerAttackCooldownUntil(UUID playerId, long epochMillis) {
+        if (epochMillis <= 0L) playerAttackCooldownUntilEpochMillis.remove(playerId);
+        else playerAttackCooldownUntilEpochMillis.put(playerId, epochMillis);
+        setDirty();
+    }
+
+    public void clearPlayerAttackCooldown(UUID playerId) {
+        if (playerAttackCooldownUntilEpochMillis.remove(playerId) != null) setDirty();
+    }
+
     public void changed() { setDirty(); }
 
     @Override
@@ -106,6 +121,15 @@ public final class WarSavedData extends SavedData {
             cooldownList.add(cooldown);
         }
         tag.put("attackCooldowns", cooldownList);
+
+        ListTag playerCooldownList = new ListTag();
+        for (Map.Entry<UUID, Long> entry : playerAttackCooldownUntilEpochMillis.entrySet()) {
+            CompoundTag cooldown = new CompoundTag();
+            cooldown.putUUID("playerId", entry.getKey());
+            cooldown.putLong("until", entry.getValue());
+            playerCooldownList.add(cooldown);
+        }
+        tag.put("playerAttackCooldowns", playerCooldownList);
         return tag;
     }
 
@@ -136,6 +160,14 @@ public final class WarSavedData extends SavedData {
             if (!cooldown.hasUUID("partyId")) continue;
             long until = cooldown.getLong("until");
             if (until > 0L) data.attackCooldownUntilEpochMillis.put(cooldown.getUUID("partyId"), until);
+        }
+
+        ListTag playerCooldownList = tag.getList("playerAttackCooldowns", Tag.TAG_COMPOUND);
+        for (Tag e : playerCooldownList) {
+            CompoundTag cooldown = (CompoundTag)e;
+            if (!cooldown.hasUUID("playerId")) continue;
+            long until = cooldown.getLong("until");
+            if (until > 0L) data.playerAttackCooldownUntilEpochMillis.put(cooldown.getUUID("playerId"), until);
         }
 
         return data;

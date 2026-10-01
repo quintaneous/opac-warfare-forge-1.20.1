@@ -172,7 +172,7 @@ public final class WarCommands {
                 return 0;
             }
 
-            long remaining = WarManager.get(src.getServer()).remainingAttackCooldownSeconds(party.getId());
+            long remaining = WarManager.get(src.getServer()).remainingAttackCooldownSeconds(party.getId(), player.getUUID());
             if (remaining <= 0L) {
                 src.sendSuccess(() -> Component.literal("Your nation has no offensive-war cooldown.")
                         .withStyle(ChatFormatting.GREEN), false);
