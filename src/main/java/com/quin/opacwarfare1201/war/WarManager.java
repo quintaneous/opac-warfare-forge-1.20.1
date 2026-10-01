@@ -766,7 +766,7 @@ public final class WarManager {
                 continue;
             }
             if (isAttacker(war, p.getUUID())) attackers++;
-            else if (OpacSides.isMember(server, p.getUUID(), war.defenderPartyId, war.defenderOwnerId)) defenders++;
+            else if (isDefender(war, p.getUUID())) defenders++;
         }
         return new CaptureCounts(attackers, defenders);
     }
@@ -1246,6 +1246,49 @@ public final class WarManager {
         else if (OpacSides.isMember(server, player.getUUID(), war.defenderPartyId, war.defenderOwnerId)) finish(war, true);
     }
 
+    private void handlePreparationActivation(WarRecord war, ServerLevel level) {
+        boolean attackerOnline = rosterHasOnlinePlayer(war.attackerRoster);
+        boolean defenderRequired = war.defenderPartyId != null && WarConfig.REQUIRE_ONLINE_DEFENDER.get();
+        boolean defenderOnline = !defenderRequired || rosterHasOnlinePlayer(war.defenderRoster);
+
+        if (attackerOnline && defenderOnline) {
+            activate(war);
+            return;
+        }
+
+        long now = level.getGameTime();
+        if (war.onlineGraceDeadlineGameTime <= 0L) {
+            int graceMinutes = WarConfig.ACTIVATION_ONLINE_GRACE_MINUTES.get();
+            war.onlineGraceDeadlineGameTime = now + graceMinutes * 60L * 20L;
+            data.changed();
+
+            broadcast(Component.literal("WAR WAITING: activation is paused for up to " + graceMinutes
+                    + " minute(s) because a required frozen-roster side has no player online.")
+                    .withStyle(ChatFormatting.YELLOW));
+
+            if (graceMinutes > 0) return;
+        }
+
+        if (now < war.onlineGraceDeadlineGameTime) return;
+
+        if (!attackerOnline) {
+            broadcast(Component.literal("WAR FORFEIT: the attacking roster had no player online before the activation grace period expired.")
+                    .withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
+            finish(war, false);
+        } else if (!defenderOnline) {
+            broadcast(Component.literal("WAR FORFEIT: the defending roster remained offline through the activation grace period.")
+                    .withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
+            finish(war, true);
+        }
+    }
+
+    private boolean rosterHasOnlinePlayer(Set<UUID> roster) {
+        for (UUID playerId : roster) {
+            if (server.getPlayerList().getPlayer(playerId) != null) return true;
+        }
+        return false;
+    }
+
     private void activate(WarRecord war) {
         if (war.isCityWar()) {
             StrategicCity city = data.getCity(war.cityId);
@@ -1260,6 +1303,10 @@ public final class WarManager {
 
             war.phase = WarPhase.ACTIVE;
             war.progress = 0.5D;
+            war.onlineGraceDeadlineGameTime = 0L;
+            int maxMinutes = WarConfig.ACTIVE_WAR_MAX_MINUTES.get();
+            war.activeEndsAtGameTime = maxMinutes <= 0 ? 0L
+                    : level.getGameTime() + maxMinutes * 60L * 20L;
             data.changed();
             broadcast(Component.literal("CITY WAR ACTIVE: " + attackerName(war) + " is assaulting " + city.id
                     + " (" + defenderName(war) + "). Capture chunk [" + war.chunkX + ", " + war.chunkZ + "] at Y="
@@ -1280,6 +1327,10 @@ public final class WarManager {
         claims.claim(war.dimension, SpecialClaimOwners.SERVER, 0, war.chunkX, war.chunkZ, false);
         war.phase = WarPhase.ACTIVE;
         war.progress = 0.5D;
+        war.onlineGraceDeadlineGameTime = 0L;
+        int maxMinutes = WarConfig.ACTIVE_WAR_MAX_MINUTES.get();
+        war.activeEndsAtGameTime = maxMinutes <= 0 ? 0L
+                : level.getGameTime() + maxMinutes * 60L * 20L;
         data.changed();
 
         broadcast(Component.literal("WAR ACTIVE: " + attackerName(war) + " vs " + defenderName(war)
@@ -1592,7 +1643,16 @@ public final class WarManager {
             showCaptureObjective(war, level);
 
             if (war.phase == WarPhase.PREPARING) {
-                if (level.getGameTime() >= war.activateAtGameTime) activate(war);
+                if (level.getGameTime() >= war.activateAtGameTime) {
+                    handlePreparationActivation(war, level);
+                }
+                continue;
+            }
+
+            if (war.activeEndsAtGameTime > 0L && level.getGameTime() >= war.activeEndsAtGameTime) {
+                broadcast(Component.literal("WAR TIME LIMIT: defenders held the objective until the battle timer expired.")
+                        .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+                finish(war, false);
                 continue;
             }
 
@@ -1602,9 +1662,13 @@ public final class WarManager {
 
             double perSecond = 0.5D / WarConfig.CAPTURE_SECONDS_FROM_MIDPOINT.get();
             if (attackers > defenders) {
-                war.progress += perSecond * (attackers - defenders);
+                int advantage = attackers - defenders;
+                double multiplier = Math.min(WarConfig.CAPTURE_MAX_MULTIPLIER.get(), Math.sqrt(advantage));
+                war.progress += perSecond * multiplier;
             } else if (defenders > attackers) {
-                war.progress -= perSecond * (defenders - attackers);
+                int advantage = defenders - attackers;
+                double multiplier = Math.min(WarConfig.CAPTURE_MAX_MULTIPLIER.get(), Math.sqrt(advantage));
+                war.progress -= perSecond * multiplier;
             } else if (attackers == 0 && defenders == 0) {
                 double decay = 0.5D / WarConfig.EMPTY_DECAY_SECONDS.get();
                 if (war.progress > 0.5D) war.progress = Math.max(0.5D, war.progress - decay);
