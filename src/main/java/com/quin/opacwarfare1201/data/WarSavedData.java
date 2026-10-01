@@ -11,7 +11,9 @@ import net.minecraft.world.level.saveddata.SavedData;
 import javax.annotation.Nullable;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public final class WarSavedData extends SavedData {
@@ -21,6 +23,7 @@ public final class WarSavedData extends SavedData {
     private final Map<String, StrategicCity> cities = new LinkedHashMap<>();
     private final Map<UUID, Long> attackCooldownUntilEpochMillis = new LinkedHashMap<>();
     private final Map<UUID, Long> playerAttackCooldownUntilEpochMillis = new LinkedHashMap<>();
+    private final Map<UUID, Set<UUID>> partyMemberSnapshots = new LinkedHashMap<>();
 
     public Collection<WarRecord> wars() { return wars.values(); }
     public WarRecord get(UUID id) { return wars.get(id); }
@@ -97,6 +100,21 @@ public final class WarSavedData extends SavedData {
         if (playerAttackCooldownUntilEpochMillis.remove(playerId) != null) setDirty();
     }
 
+    public Map<UUID, Set<UUID>> partyMemberSnapshots() {
+        return partyMemberSnapshots;
+    }
+
+    public void setPartyMemberSnapshot(UUID partyId, Collection<UUID> members) {
+        partyMemberSnapshots.put(partyId, new LinkedHashSet<>(members));
+        setDirty();
+    }
+
+    public Set<UUID> removePartyMemberSnapshot(UUID partyId) {
+        Set<UUID> removed = partyMemberSnapshots.remove(partyId);
+        if (removed != null) setDirty();
+        return removed;
+    }
+
     public void changed() { setDirty(); }
 
     @Override
@@ -130,6 +148,21 @@ public final class WarSavedData extends SavedData {
             playerCooldownList.add(cooldown);
         }
         tag.put("playerAttackCooldowns", playerCooldownList);
+
+        ListTag partySnapshots = new ListTag();
+        for (Map.Entry<UUID, Set<UUID>> entry : partyMemberSnapshots.entrySet()) {
+            CompoundTag snapshot = new CompoundTag();
+            snapshot.putUUID("partyId", entry.getKey());
+            ListTag members = new ListTag();
+            for (UUID memberId : entry.getValue()) {
+                CompoundTag member = new CompoundTag();
+                member.putUUID("playerId", memberId);
+                members.add(member);
+            }
+            snapshot.put("members", members);
+            partySnapshots.add(snapshot);
+        }
+        tag.put("partyMemberSnapshots", partySnapshots);
         return tag;
     }
 
@@ -168,6 +201,19 @@ public final class WarSavedData extends SavedData {
             if (!cooldown.hasUUID("playerId")) continue;
             long until = cooldown.getLong("until");
             if (until > 0L) data.playerAttackCooldownUntilEpochMillis.put(cooldown.getUUID("playerId"), until);
+        }
+
+        ListTag partySnapshots = tag.getList("partyMemberSnapshots", Tag.TAG_COMPOUND);
+        for (Tag e : partySnapshots) {
+            CompoundTag snapshot = (CompoundTag)e;
+            if (!snapshot.hasUUID("partyId")) continue;
+            Set<UUID> members = new LinkedHashSet<>();
+            ListTag memberList = snapshot.getList("members", Tag.TAG_COMPOUND);
+            for (Tag memberTag : memberList) {
+                CompoundTag member = (CompoundTag)memberTag;
+                if (member.hasUUID("playerId")) members.add(member.getUUID("playerId"));
+            }
+            data.partyMemberSnapshots.put(snapshot.getUUID("partyId"), members);
         }
 
         return data;
