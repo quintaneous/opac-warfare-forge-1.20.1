@@ -1,5 +1,6 @@
 package com.quin.opacwarfare1201.war;
 
+import com.quin.opacwarfare1201.data.CompressedBlockSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
@@ -22,7 +23,7 @@ public final class StrategicCity {
     public int captureY;
     @Nullable public UUID controllerPartyId;
     @Nullable public UUID controllerOwnerId;
-    public final Set<Long> protectedBlocks = new HashSet<>();
+    public final CompressedBlockSet protectedBlocks = new CompressedBlockSet();
     /**
      * Blocks added after the city was created. These are siege fortifications:
      * budget-limited in peacetime and destructible during an ACTIVE city siege.
@@ -50,7 +51,7 @@ public final class StrategicCity {
     }
 
     public boolean isProtected(BlockPos pos) {
-        return protectedBlocks.contains(pos.asLong());
+        return protectedBlocks.contains(pos);
     }
 
     public boolean isControlledBy(@Nullable UUID partyId) {
@@ -71,13 +72,10 @@ public final class StrategicCity {
         if (controllerPartyId != null) t.putUUID("controllerPartyId", controllerPartyId);
         if (controllerOwnerId != null) t.putUUID("controllerOwnerId", controllerOwnerId);
 
-        long[] protectedArray = new long[protectedBlocks.size()];
-        int i = 0;
-        for (long pos : protectedBlocks) protectedArray[i++] = pos;
-        t.putLongArray("protectedBlocks", protectedArray);
+        t.put("protectedSections", protectedBlocks.save());
 
         long[] fortificationArray = new long[fortificationBlocks.size()];
-        i = 0;
+        int i = 0;
         for (long pos : fortificationBlocks) fortificationArray[i++] = pos;
         t.putLongArray("fortificationBlocks", fortificationArray);
         t.putBoolean("fortificationTrackingInitialized", fortificationTrackingInitialized);
@@ -96,7 +94,12 @@ public final class StrategicCity {
         city.captureY = t.getInt("captureY");
         city.controllerPartyId = t.hasUUID("controllerPartyId") ? t.getUUID("controllerPartyId") : null;
         city.controllerOwnerId = t.hasUUID("controllerOwnerId") ? t.getUUID("controllerOwnerId") : null;
-        for (long pos : t.getLongArray("protectedBlocks")) city.protectedBlocks.add(pos);
+        if (t.contains("protectedSections", net.minecraft.nbt.Tag.TAG_LIST)) {
+            city.protectedBlocks.load(t.getList("protectedSections", net.minecraft.nbt.Tag.TAG_COMPOUND));
+        } else {
+            // 0.3.x migration path.
+            city.protectedBlocks.loadLegacy(t.getLongArray("protectedBlocks"));
+        }
         for (long pos : t.getLongArray("fortificationBlocks")) city.fortificationBlocks.add(pos);
         city.fortificationTrackingInitialized = t.getBoolean("fortificationTrackingInitialized");
         return city;
